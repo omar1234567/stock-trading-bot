@@ -12,7 +12,7 @@ from email.mime.multipart import MIMEMultipart
 from datetime import datetime
 import yfinance as yf
 import pandas as pd
-import pandas_ta as ta
+import ta
 import anthropic
 
 # ============================================================
@@ -181,11 +181,11 @@ def analyze_ticker(ticker):
             return None
 
         # --- Technical Indicators ---
-        df['RSI']   = ta.rsi(df['Close'], length=14)
-        df['EMA9']  = ta.ema(df['Close'], length=9)
-        df['EMA21'] = ta.ema(df['Close'], length=21)
-        df['EMA50'] = ta.ema(df['Close'], length=50)
-        df['EMA200']= ta.ema(df['Close'], length=200)
+        df['RSI']   = ta.momentum.RSIIndicator(df['Close'], window=14).rsi()
+        df['EMA9']  = ta.trend.EMAIndicator(df['Close'], window=9).ema_indicator()
+        df['EMA21'] = ta.trend.EMAIndicator(df['Close'], window=21).ema_indicator()
+        df['EMA50'] = ta.trend.EMAIndicator(df['Close'], window=50).ema_indicator()
+        df['EMA200']= ta.trend.EMAIndicator(df['Close'], window=200).ema_indicator()
 
         latest = df.iloc[-1]
         price  = round(latest['Close'], 2)
@@ -400,3 +400,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
