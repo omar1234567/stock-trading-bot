@@ -22,11 +22,11 @@ import anthropic
 WATCHLIST = {
     "US": [
         "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL",
-        "META", "TSLA", "JPM", "V", "JNJ"
+        "META", "TSLA", "JPM", "UBER", "JNJ"
     ],
     "TSX": [
-        "RY.TO", "TD.TO", "BNS.TO", "ENB.TO", "CNQ.TO",
-        "SU.TO", "BCE.TO", "MFC.TO", "TRP.TO", "ABX.TO"
+        "CSU.TO", "TD.TO", "BNS.TO", "ENB.TO", "CNQ.TO",
+        "SU.TO", "BCE.TO", "ATRL.TO", "TRP.TO", "ABX.TO"
     ]
 }
 
