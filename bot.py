@@ -23,7 +23,7 @@ WATCHLIST = {
     "US": [
         # Technology
         "NVDA", "AAPL", "MSFT", "GOOGL", "AVGO",
-        "AMD", "CSCO", "MU", "LRCX", "ORCL", "TXN",
+        "AMD", "CSCO", "MU", "LRCX", "ORCL", "TXN", "PATH",
         # Healthcare & Pharma
         "LLY", "JNJ", "ABBV", "MRK", "ABT", "TMO",
         # Consumer & Industrial
