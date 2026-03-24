@@ -26,7 +26,7 @@ WATCHLIST = {
     ],
     "TSX": [
         "CSU.TO", "TD.TO", "BNS.TO", "ENB.TO", "CNQ.TO",
-        "SU.TO", "BCE.TO", "ATRL.TO", "TRP.TO", "ABX.TO"
+        "SU.TO", "BCE.TO", "ATRL.TO", "TRP.TO", "ABX.TO", "DOL.TO"
     ]
 }
 
