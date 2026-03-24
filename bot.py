@@ -96,12 +96,160 @@ Currency: [USD / CAD]
 ⚠️ Key Risks:
 [1–2 sentences on what could invalidate this trade: upcoming earnings, macro events, weak volume, etc.]
 
+☪️ Shariah Compliance (AAOIFI):
+State the compliance status clearly: COMPLIANT, DOUBTFUL, or NON-COMPLIANT.
+If NON-COMPLIANT or DOUBTFUL, list the specific violations or concerns.
+Always include this section — even for compliant stocks, confirm it passed all screens.
+
 ---
 
 If NO trades meet the criteria, respond with:
 NO TRADES TODAY — No setups met the minimum criteria (3/4 indicator alignment + 1:2 R:R).
 Watchlist reviewed: [list all tickers checked]
 """
+
+# ============================================================
+# AAOIFI SHARIAH COMPLIANCE SCREENING
+# ============================================================
+
+PROHIBITED_SECTORS = [
+    "banks", "diversified banks", "regional banks", "thrifts & mortgage finance",
+    "consumer finance", "capital markets", "insurance", "life insurance",
+    "property & casualty insurance", "reinsurance", "multi-line insurance",
+    "insurance brokers", "diversified financial services",
+    "distillers & vintners", "brewers", "tobacco",
+    "casinos & gaming", "adult entertainment", "aerospace & defense",
+    "mortgage real estate investment trusts (reits)"
+]
+
+PROHIBITED_KEYWORDS = [
+    "bank", "banking", "insurance", "alcohol", "brewery", "brewer",
+    "distill", "tobacco", "casino", "gambling", "gaming", "defense",
+    "weapon", "ammunition", "adult", "mortgage reit"
+]
+
+
+def shariah_screen(ticker):
+    """
+    Screen a stock for AAOIFI Shariah compliance.
+    Checks: business activity, debt ratio, cash ratio, receivables ratio.
+    """
+    result = {
+        "status": "UNKNOWN", "emoji": "UNKNOWN",
+        "issues": [], "ratios": {},
+        "sector": "N/A", "industry": "N/A", "note": ""
+    }
+
+    try:
+        stock = yf.Ticker(ticker)
+        info  = stock.info
+
+        sector   = (info.get("sector",   "") or "").strip()
+        industry = (info.get("industry", "") or "").strip()
+        result["sector"]   = sector   or "N/A"
+        result["industry"] = industry or "N/A"
+
+        industry_lower = industry.lower()
+        sector_lower   = sector.lower()
+
+        # 1. Business Activity Screen
+        business_fail = False
+        for prohibited in PROHIBITED_SECTORS:
+            if prohibited in industry_lower or prohibited in sector_lower:
+                business_fail = True
+                result["issues"].append(f"Prohibited business: {industry or sector}")
+                break
+        if not business_fail:
+            for keyword in PROHIBITED_KEYWORDS:
+                if keyword in industry_lower or keyword in sector_lower:
+                    business_fail = True
+                    result["issues"].append(f"Prohibited activity detected: {industry}")
+                    break
+
+        # 2. Financial Ratio Screens
+        try:
+            balance_sheet = stock.balance_sheet
+
+            def get_row(df, *names):
+                for name in names:
+                    if name in df.index:
+                        val = df.loc[name].iloc[0]
+                        if pd.notna(val):
+                            return float(val)
+                return None
+
+            total_assets    = get_row(balance_sheet, "Total Assets", "TotalAssets")
+            total_debt      = get_row(balance_sheet, "Total Debt", "TotalDebt", "Long Term Debt And Capital Lease Obligation")
+            total_cash      = get_row(balance_sheet, "Cash And Cash Equivalents", "Cash", "Cash Cash Equivalents And Short Term Investments")
+            net_receivables = get_row(balance_sheet, "Net Receivables", "Receivables", "Accounts Receivable")
+
+            if total_cash is None: total_cash = info.get("totalCash")
+            if total_debt is None: total_debt = info.get("totalDebt")
+
+            if total_assets and total_assets > 0:
+                if total_debt is not None:
+                    debt_ratio = round((total_debt / total_assets) * 100, 1)
+                    result["ratios"]["Debt / Assets"] = f"{debt_ratio}% (limit: <30%)"
+                    if debt_ratio >= 30:
+                        result["issues"].append(f"Debt ratio too high: {debt_ratio}% >= 30%")
+
+                if total_cash is not None:
+                    cash_ratio = round((total_cash / total_assets) * 100, 1)
+                    result["ratios"]["Cash / Assets"] = f"{cash_ratio}% (limit: <30%)"
+                    if cash_ratio >= 30:
+                        result["issues"].append(f"Cash/interest ratio too high: {cash_ratio}% >= 30%")
+
+                if net_receivables is not None:
+                    rec_ratio = round((net_receivables / total_assets) * 100, 1)
+                    result["ratios"]["Receivables / Assets"] = f"{rec_ratio}% (limit: <70%)"
+                    if rec_ratio >= 70:
+                        result["issues"].append(f"Receivables ratio too high: {rec_ratio}% >= 70%")
+            else:
+                result["ratios"]["note"] = "Balance sheet unavailable — manual review required"
+
+        except Exception as e:
+            result["ratios"]["note"] = f"Could not retrieve balance sheet: {str(e)[:60]}"
+
+        # 3. Final Status
+        if business_fail or result["issues"]:
+            result["status"] = "NON-COMPLIANT"
+            result["emoji"]  = "[NON-COMPLIANT]"
+        elif "unavailable" in result["ratios"].get("note", ""):
+            result["status"] = "DOUBTFUL"
+            result["emoji"]  = "[DOUBTFUL]"
+            result["note"]   = "Financial data unavailable - manual Shariah review recommended"
+        else:
+            result["status"] = "COMPLIANT"
+            result["emoji"]  = "[COMPLIANT]"
+
+    except Exception as e:
+        result["status"] = "UNKNOWN"
+        result["emoji"]  = "[UNKNOWN]"
+        result["note"]   = f"Screening error: {str(e)[:80]}"
+
+    return result
+
+
+def format_shariah_block(ticker, screen):
+    """Format the Shariah screening result as a readable text block"""
+    lines = [
+        f"\nSHARIAH COMPLIANCE (AAOIFI Standard):",
+        f"  Status:   {screen['emoji']} {screen['status']}",
+        f"  Sector:   {screen['sector']}",
+        f"  Industry: {screen['industry']}",
+    ]
+    if screen["ratios"]:
+        lines.append("  Financial Ratios:")
+        for k, v in screen["ratios"].items():
+            lines.append(f"    - {k}: {v}")
+    if screen["issues"]:
+        lines.append("  Violations:")
+        for issue in screen["issues"]:
+            lines.append(f"    X {issue}")
+    if screen["note"]:
+        lines.append(f"  Note: {screen['note']}")
+    return "\n".join(lines)
+
 
 # ============================================================
 # TECHNICAL ANALYSIS
@@ -244,6 +392,11 @@ def analyze_ticker(ticker):
 
         currency = "CAD" if ticker.endswith(".TO") else "USD"
 
+        # --- Shariah Compliance ---
+        print(f"     ☪  Running Shariah screen for {ticker}...")
+        shariah = shariah_screen(ticker)
+        shariah_block = format_shariah_block(ticker, shariah)
+
         summary = f"""
 {'='*55}
 TICKER: {ticker} | Currency: {currency}
@@ -276,6 +429,7 @@ FUNDAMENTAL DATA:
   Revenue Growth:   {rev_growth}
   Analyst Rating:   {rating}
   Analyst Target:   {target}
+{shariah_block}
 """
         return summary
 
@@ -342,6 +496,12 @@ def send_email(report):
   <div style="background:#f4f6f7;border-left:4px solid #154360;padding:12px 16px;border-radius:4px;margin-bottom:24px;">
     <strong>How to use this report:</strong> Review each signal before market open.
     Enter only trades that match your risk tolerance. Always respect your stop loss.
+  </div>
+  <div style="background:#fef9f0;border-left:4px solid #d4a017;padding:12px 16px;border-radius:4px;margin-bottom:24px;font-size:13px;">
+    <strong>☪️ Shariah Compliance Legend (AAOIFI Standard):</strong><br>
+    [COMPLIANT] — Passed all business activity and financial ratio screens<br>
+    [DOUBTFUL] — Data unavailable or borderline — manual review recommended before trading<br>
+    [NON-COMPLIANT] — Fails one or more AAOIFI screens — avoid if observing Shariah guidelines
   </div>
   <div style="white-space:pre-wrap;line-height:1.8;font-size:14px;">
 {report}
