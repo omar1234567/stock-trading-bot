@@ -3,7 +3,7 @@ name: Daily Stock Trading Bot
 on:
   schedule:
     # Runs at 12:30 UTC = 8:30 AM Eastern Time, Monday through Friday
-    - cron: '30 12 * * 1-5'
+    - cron: '0 11 * * 1-5'
 
   # Allows you to manually trigger the bot anytime from GitHub (great for testing)
   workflow_dispatch:
