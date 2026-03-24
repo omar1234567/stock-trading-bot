@@ -21,14 +21,28 @@ import anthropic
 
 WATCHLIST = {
     "US": [
-        "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL",
-        "META", "TSLA", "SERV", "UBER", "LLY", "UPWK", "ONDS"
+        # Technology
+        "NVDA", "AAPL", "MSFT", "GOOGL", "AVGO",
+        "AMD", "CSCO", "MU", "LRCX", "ORCL", "TXN",
+        # Healthcare & Pharma
+        "LLY", "JNJ", "ABBV", "MRK", "ABT", "TMO",
+        # Consumer & Industrial
+        "TSLA", "HD", "PG", "PEP", "LIN",
+        # Energy
+        "XOM",
     ],
     "TSX": [
-        "CSU.TO", "TD.TO", "BNS.TO", "ENB.TO", "CNQ.TO",
-        "SU.TO", "BCE.TO", "ATRL.TO", "TRP.TO", "ABX.TO", "DOL.TO"
+        # Technology
+        "CSU.TO", "SHOP.TO",
+        # Industrial & Transport
+        "TIH.TO", "TFII.TO", "WCN.TO", "CNR.TO", "CP.TO",
+        # Energy & Resources
+        "CNQ.TO", "SU.TO",
+        # Consumer & Industrial
+        "ATD.TO", "MG.TO",
     ]
 }
+
 
 # ============================================================
 # SETTINGS — Loaded automatically from GitHub Secrets
