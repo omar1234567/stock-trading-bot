@@ -22,25 +22,63 @@ from tracker import log_signal, resolve_open_trades, generate_performance_summar
 
 WATCHLIST = {
     "US": [
-        # Technology
-        "NVDA", "AAPL", "MSFT", "GOOGL", "AVGO",
-        "AMD", "CSCO", "MU", "LRCX", "ORCL", "TXN",
-        # Healthcare & Pharma
-        "LLY", "JNJ", "ABBV", "MRK", "ABT", "TMO",
-        # Consumer & Industrial
-        "TSLA", "HD", "PG", "PEP", "LIN",
-        # Energy
-        "XOM",
+        # ── Semiconductors & Hardware ──────────────────────────
+        "NVDA", "AAPL", "MSFT", "AVGO", "AMD",
+        "MU", "LRCX", "AMAT", "TXN", "KLAC",
+        "MCHP", "SWKS", "MPWR", "ON", "TER",
+        # ── Software & Cloud ──────────────────────────────────
+        "GOOGL", "ORCL", "ADBE", "CRM", "NOW",
+        "SNOW", "PANW", "CRWD", "ANSS", "CDNS",
+        "SNPS", "ANET",
+        # ── Healthcare & Biotech ──────────────────────────────
+        "LLY", "JNJ", "ABBV", "MRK", "ABT",
+        "TMO", "AMGN", "GILD", "REGN", "VRTX",
+        "BSX", "SYK", "ISRG", "DHR", "EW",
+        "DXCM", "GEHC", "RMD", "IDXX", "ALGN",
+        # ── Energy ────────────────────────────────────────────
+        "XOM", "CVX", "COP", "EOG", "OXY",
+        # ── Consumer ──────────────────────────────────────────
+        "TSLA", "HD", "PG", "PEP", "COST",
+        "LOW", "NKE", "SBUX", "LIN",
+        # ── Industrials & Transport ───────────────────────────
+        "CAT", "DE", "HON", "GEV",
+        "ODFL", "JBHT", "EXPD",
+        # ── Healthcare & Medical Devices ──────────────────────
+        "PODD", "HOLX", "TECH", "EXAS", "INSP",
+        "ITGR", "NVCR", "PCVX", "RXRX",
+        # ── Technology & Software ─────────────────────────────
+        "AXON", "TRMB", "ENTG", "ACLS", "ONTO",
+        "MKSI", "SITM", "SMTC", "DIOD",
+        # ── Industrials & Logistics ───────────────────────────
+        "SAIA", "XPO", "CHRW", "GNRC",
+        # ── Consumer ──────────────────────────────────────────
+        "DECK", "WSM", "LULU", "WING", "CELH", "ELF",
     ],
     "TSX": [
-        # Technology
-        "CSU.TO", "SHOP.TO",
-        # Industrial & Transport
-        "TIH.TO", "TFII.TO", "WCN.TO", "CNR.TO", "CP.TO",
-        # Energy & Resources
+        # ── Technology ────────────────────────────────────────
+        "CSU.TO", "SHOP.TO", "OTEX.TO", "GIB-A.TO",
+        # ── Industrials & Transport ───────────────────────────
+        "TIH.TO", "TFII.TO", "WCN.TO", "CNR.TO",
+        "CP.TO", "STN.TO", "WSP.TO",
+        # ── Energy ────────────────────────────────────────────
         "CNQ.TO", "SU.TO",
-        # Consumer & Industrial
-        "ATD.TO", "MG.TO",
+        # ── Mining & Materials ────────────────────────────────
+        "NTR.TO", "WPM.TO", "FNV.TO",
+        "AEM.TO", "IVN.TO",
+        # ── Consumer & Retail ─────────────────────────────────
+        "ATD.TO", "DOL.TO", "CTC-A.TO",
+        # ── Automotive & Manufacturing ────────────────────────
+        "MG.TO", "MRE.TO",
+        # ── Technology & Software ─────────────────────────────
+        "KXS.TO", "DSG.TO", "LSPD.TO",
+        "MDA.TO", "ATA.TO",
+        # ── Industrials & Engineering ─────────────────────────
+        "BDT.TO", "CIGI.TO",
+        # ── Mining & Resources ────────────────────────────────
+        "LUN.TO", "ERO.TO", "HBM.TO",
+        "AGI.TO", "K.TO",
+        # ── Consumer & Food ───────────────────────────────────
+        "PBH.TO", "MTY.TO", "DOO.TO",
     ]
 }
 
