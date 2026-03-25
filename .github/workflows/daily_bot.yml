@@ -2,7 +2,7 @@ name: Daily Stock Trading Bot
 
 on:
   schedule:
-    # Runs at 12:30 UTC = 8:30 AM Eastern Time, Monday through Friday
+    # Runs at 11:00 UTC = 7:00 AM Eastern Time, Monday through Friday
     - cron: '0 11 * * 1-5'
 
   # Allows you to manually trigger the bot anytime from GitHub (great for testing)
@@ -11,6 +11,10 @@ on:
 jobs:
   run-bot:
     runs-on: ubuntu-latest
+
+    # Allow the workflow to write back to the repository (needed for trades_log.json)
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout repository
@@ -31,3 +35,11 @@ jobs:
           EMAIL_PASSWORD:    ${{ secrets.EMAIL_PASSWORD }}
           EMAIL_RECIPIENT:   ${{ secrets.EMAIL_RECIPIENT }}
         run: python bot.py
+
+      - name: Save trades log back to repository
+        run: |
+          git config user.name  "Stock Bot"
+          git config user.email "stock-bot@github-actions"
+          git add trades_log.json || true
+          git diff --staged --quiet || git commit -m "📊 Update trades log — $(date +'%Y-%m-%d')"
+          git push || true
