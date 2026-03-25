@@ -676,19 +676,29 @@ PHASE 2 — SIGNAL FILTERS:
 # ============================================================
 
 def get_trade_signals(ticker_summaries):
-    """Send all ticker data to Claude and get back the daily trade report"""
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    """
+    Send all ticker data to Claude and get back the daily trade report.
+    Includes automatic retry with exponential backoff for server overload errors.
+    """
+    import time
 
+    client        = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     combined_data = "\n".join(ticker_summaries)
     today_str     = datetime.now().strftime("%A, %B %d, %Y")
 
-    message = client.messages.create(
-        model="claude-opus-4-6",
-        max_tokens=4000,
-        system=SYSTEM_PROMPT,
-        messages=[{
-            "role": "user",
-            "content": f"""Today is {today_str}.
+    max_retries = 5
+    base_delay  = 30   # seconds — doubles each retry: 30, 60, 120, 240, 480
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            print(f"  🧠 Claude API call — attempt {attempt}/{max_retries}...")
+            message = client.messages.create(
+                model="claude-opus-4-6",
+                max_tokens=4000,
+                system=SYSTEM_PROMPT,
+                messages=[{
+                    "role": "user",
+                    "content": f"""Today is {today_str}.
 
 Please analyze the following data for my complete watchlist and identify any high-conviction trade setups.
 Apply your strict quality rules — only surface trades where at least 3 of 4 indicators align and R:R ≥ 1:2.
@@ -697,10 +707,28 @@ If nothing qualifies today, say so honestly.
 {combined_data}
 
 Provide your full daily trading report now."""
-        }]
-    )
+                }]
+            )
+            return message.content[0].text
 
-    return message.content[0].text
+        except anthropic.APIStatusError as e:
+            if e.status_code == 529:
+                wait = base_delay * (2 ** (attempt - 1))
+                print(f"  ⏳ Anthropic servers overloaded (529). "
+                      f"Waiting {wait}s before retry {attempt}/{max_retries}...")
+                time.sleep(wait)
+            else:
+                raise   # Re-raise non-overload errors immediately
+
+        except anthropic.APIConnectionError:
+            wait = base_delay * (2 ** (attempt - 1))
+            print(f"  ⏳ Connection error. Waiting {wait}s before retry {attempt}/{max_retries}...")
+            time.sleep(wait)
+
+    raise RuntimeError(
+        f"Claude API unavailable after {max_retries} attempts. "
+        f"Anthropic servers may be under heavy load — the bot will try again tomorrow."
+    )
 
 
 # ============================================================
@@ -888,3 +916,5 @@ MARKET CONTEXT (checked before individual stocks)
 
 if __name__ == "__main__":
     main()
+
+
