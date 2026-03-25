@@ -14,6 +14,7 @@ import yfinance as yf
 import pandas as pd
 import ta
 import anthropic
+from tracker import log_signal, resolve_open_trades, generate_performance_summary, get_recent_closed_trades
 
 # ============================================================
 # YOUR WATCHLIST — Add or remove tickers here anytime
@@ -23,7 +24,7 @@ WATCHLIST = {
     "US": [
         # Technology
         "NVDA", "AAPL", "MSFT", "GOOGL", "AVGO",
-        "AMD", "CSCO", "MU", "LRCX", "ORCL", "TXN", "PATH","UBER",
+        "AMD", "CSCO", "MU", "LRCX", "ORCL", "TXN", "UBER",
         # Healthcare & Pharma
         "LLY", "JNJ", "ABBV", "MRK", "ABT", "TMO",
         # Consumer & Industrial
@@ -42,7 +43,6 @@ WATCHLIST = {
         "ATD.TO", "MG.TO",
     ]
 }
-
 
 # ============================================================
 # SETTINGS — Loaded automatically from GitHub Secrets
@@ -488,7 +488,7 @@ Provide your full daily trading report now."""
 # EMAIL
 # ============================================================
 
-def send_email(report):
+def send_email(report, perf_summary, recent_trades):
     """Send the daily report as a formatted HTML email"""
     today_str = datetime.now().strftime("%A, %B %d, %Y")
     subject   = f"📈 Daily Trade Signals — {today_str}"
@@ -498,7 +498,7 @@ def send_email(report):
     msg['From']    = EMAIL_SENDER
     msg['To']      = EMAIL_RECIPIENT
 
-    plain = f"DAILY TRADE SIGNALS — {today_str}\n{'='*50}\n\n{report}\n\n---\n⚠️ Not financial advice. Do your own research."
+    plain = f"DAILY TRADE SIGNALS — {today_str}\n{'='*50}\n\n{report}\n\n{perf_summary}\n\n---\n⚠️ Not financial advice. Do your own research."
 
     html = f"""
 <html>
@@ -520,6 +520,16 @@ def send_email(report):
   <div style="white-space:pre-wrap;line-height:1.8;font-size:14px;">
 {report}
   </div>
+  <hr style="margin-top:30px;border:1px solid #ddd;">
+  <h2 style="color:#154360;font-size:16px;">📊 Performance Tracker</h2>
+  <div style="white-space:pre-wrap;line-height:1.8;font-size:13px;
+              font-family:'Courier New',monospace;background:#f8f9fa;
+              padding:16px;border-radius:6px;">
+{perf_summary}
+
+Recent Closed Trades:
+{recent_trades}
+  </div>
   <hr style="margin-top:40px;border:1px solid #ddd;">
   <p style="color:#aaa;font-size:11px;">
     ⚠️ This is an automated analysis and does not constitute financial advice.
@@ -537,6 +547,57 @@ def send_email(report):
         server.sendmail(EMAIL_SENDER, EMAIL_RECIPIENT, msg.as_string())
 
     print(f"✅ Email sent to {EMAIL_RECIPIENT}")
+
+
+# ============================================================
+# SIGNAL AUTO-LOGGER
+# ============================================================
+
+def _auto_log_signals(report):
+    """
+    Parse Claude's report text and log any trade signals found.
+    Looks for the standard signal header format: TICKER — Style — LONG/SHORT
+    """
+    import re
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    # Match lines like: 🟢 NVDA — Swing — LONG  or  NVDA — Position — SHORT
+    pattern = re.compile(
+        r'([A-Z]{1,5}(?:\.TO)?)\s*[—–-]+\s*(Swing|Position)\s*[—–-]+\s*(LONG|SHORT)',
+        re.IGNORECASE
+    )
+    # Match entry, stop, TP1, TP2 from the table rows
+    entry_pat  = re.compile(r'Entry Price.*?\$([0-9]+\.?[0-9]*)', re.IGNORECASE)
+    stop_pat   = re.compile(r'Stop Loss.*?\$([0-9]+\.?[0-9]*)',   re.IGNORECASE)
+    tp1_pat    = re.compile(r'Take Profit 1.*?\$([0-9]+\.?[0-9]*)', re.IGNORECASE)
+    tp2_pat    = re.compile(r'Take Profit 2.*?\$([0-9]+\.?[0-9]*)', re.IGNORECASE)
+    prob_pat   = re.compile(r'Probability.*?([0-9]+)%',            re.IGNORECASE)
+
+    # Split report into per-trade blocks
+    blocks = re.split(r'(?=(?:🟢|🔴)?\s*[A-Z]{1,5}(?:\.TO)?\s*[—–-]+\s*(?:Swing|Position))', report)
+
+    for block in blocks:
+        match = pattern.search(block)
+        if not match:
+            continue
+
+        ticker    = match.group(1).upper()
+        style     = match.group(2)
+        direction = match.group(3).upper()
+
+        try:
+            entry = float(entry_pat.search(block).group(1))
+            stop  = float(stop_pat.search(block).group(1))
+            tp1   = float(tp1_pat.search(block).group(1))
+            tp2_m = tp2_pat.search(block)
+            tp2   = float(tp2_m.group(1)) if tp2_m else None
+            prob_m = prob_pat.search(block)
+            prob  = int(prob_m.group(1)) if prob_m else 0
+
+            log_signal(ticker, direction, entry, stop, tp1, tp2,
+                       style, prob, signal_date=today)
+        except Exception:
+            pass  # If parsing fails, skip silently
 
 
 # ============================================================
@@ -561,17 +622,26 @@ def main():
         return
 
     print(f"\n✅ Analyzed {len(summaries)}/{len(all_tickers)} tickers")
-    print("🧠 Sending to Claude for analysis...\n")
+    print("🔄 Resolving open trades...")
+    resolve_open_trades()
 
+    print("🧠 Sending to Claude for analysis...\n")
     report = get_trade_signals(summaries)
-    print(report[:500] + "...\n")   # Preview in logs
+    print(report[:500] + "...\n")
+
+    # Parse signals from Claude's report and log them
+    print("📝 Logging today's signals...")
+    _auto_log_signals(report)
+
+    # Build performance summary
+    perf_summary  = generate_performance_summary()
+    recent_trades = get_recent_closed_trades(10)
 
     print("📧 Sending email...")
-    send_email(report)
+    send_email(report, perf_summary, recent_trades)
 
     print("✅ Done!")
 
 
 if __name__ == "__main__":
     main()
-
