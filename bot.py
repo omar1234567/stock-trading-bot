@@ -24,7 +24,7 @@ WATCHLIST = {
     "US": [
         # Technology
         "NVDA", "AAPL", "MSFT", "GOOGL", "AVGO",
-        "AMD", "CSCO", "MU", "LRCX", "ORCL", "TXN", "UBER",
+        "AMD", "CSCO", "MU", "LRCX", "ORCL", "TXN",
         # Healthcare & Pharma
         "LLY", "JNJ", "ABBV", "MRK", "ABT", "TMO",
         # Consumer & Industrial
@@ -84,6 +84,12 @@ STRICT QUALITY RULES:
 - Calculate probability honestly — do not inflate scores
 - If no quality setups exist today, say so clearly — do not force trades
 - Flag currency clearly: USD for S&P 500 stocks, CAD for TSX (.TO) stocks
+
+PHASE 2 FILTER RULES — apply these to every signal:
+- MARKET CONTEXT: If the market context block shows SP500 or TSX as BEARISH, add a market warning label to any LONG signal. Do NOT skip it — just clearly warn: "⚠️ MARKET HEADWIND — broad market is bearish, trade with reduced size"
+- EARNINGS: If the earnings warning shows "EARNINGS IN X DAY(S)", label the trade as "🔴 HIGH RISK — EARNINGS IMMINENT" and note that the trade carries elevated volatility risk
+- VOLUME: If the volume signal shows WEAK or LOW VOLUME, note this in the Key Risks section as a lack of conviction
+- SECTOR MOMENTUM: If sector momentum is BEARISH and the signal is LONG, add a note warning of sector headwind. If sector is BULLISH and signal is LONG, note this as a tailwind that improves the setup
 
 OUTPUT FORMAT — Use this exact layout for each trade:
 
@@ -266,6 +272,206 @@ def format_shariah_block(ticker, screen):
 
 
 # ============================================================
+# PHASE 2 — MARKET INTELLIGENCE
+# ============================================================
+
+# Sector ETF map — used to check if a stock's sector is trending up or down
+SECTOR_ETF_MAP = {
+    # US sectors
+    "Technology":             "XLK",
+    "Healthcare":             "XLV",
+    "Consumer Cyclical":      "XLY",
+    "Consumer Defensive":     "XLP",
+    "Energy":                 "XLE",
+    "Industrials":            "XLI",
+    "Basic Materials":        "XLB",
+    "Communication Services": "XLC",
+    "Utilities":              "XLU",
+    "Real Estate":            "XLRE",
+    "Financial Services":     "XLF",
+    # Canadian sectors (using TSX sector ETFs)
+    "Financial":              "XFN.TO",
+    "Energy (Canada)":        "XEG.TO",
+    "Materials":              "XMA.TO",
+    "Industrials (Canada)":   "XIN.TO",
+    "Technology (Canada)":    "XIT.TO",
+}
+
+
+def get_market_context():
+    """
+    Fetch the current trend for S&P 500 (SPY) and TSX Composite (XIU.TO).
+    Returns a dict with trend direction, EMA alignment, and a warning flag.
+    Trend is determined by:
+      - Price vs EMA50 (short-term trend)
+      - EMA9 vs EMA21 (momentum)
+      - Last 3 days consecutive direction
+    """
+    context = {}
+
+    for label, ticker in [("SP500", "SPY"), ("TSX", "XIU.TO")]:
+        try:
+            df = yf.download(ticker, period="3mo", interval="1d",
+                             progress=False, auto_adjust=True)
+            if df.empty or len(df) < 30:
+                context[label] = {"trend": "UNKNOWN", "warning": False, "detail": "No data"}
+                continue
+
+            df["EMA9"]  = ta.trend.EMAIndicator(df["Close"], window=9).ema_indicator()
+            df["EMA21"] = ta.trend.EMAIndicator(df["Close"], window=21).ema_indicator()
+            df["EMA50"] = ta.trend.EMAIndicator(df["Close"], window=50).ema_indicator()
+
+            latest  = df.iloc[-1]
+            price   = float(latest["Close"])
+            ema9    = float(latest["EMA9"])
+            ema21   = float(latest["EMA21"])
+            ema50   = float(latest["EMA50"])
+
+            # Last 3 days consecutive closes
+            last3   = df["Close"].iloc[-3:].tolist()
+            consec_down = last3[0] > last3[1] > last3[2]
+            consec_up   = last3[0] < last3[1] < last3[2]
+
+            bullish_points = sum([
+                price > ema50,
+                ema9 > ema21,
+                consec_up,
+            ])
+            bearish_points = sum([
+                price < ema50,
+                ema9 < ema21,
+                consec_down,
+            ])
+
+            if bullish_points >= 2:
+                trend   = "BULLISH"
+                warning = False
+            elif bearish_points >= 2:
+                trend   = "BEARISH"
+                warning = True
+            else:
+                trend   = "NEUTRAL"
+                warning = False
+
+            pct_vs_ema50 = round((price - ema50) / ema50 * 100, 2)
+            detail = (
+                f"Price {'+' if pct_vs_ema50 >= 0 else ''}{pct_vs_ema50}% vs EMA50 | "
+                f"EMA9 {'>' if ema9 > ema21 else '<'} EMA21 | "
+                f"Last 3 days: {'UP' if consec_up else 'DOWN' if consec_down else 'MIXED'}"
+            )
+
+            context[label] = {
+                "trend":   trend,
+                "warning": warning,
+                "detail":  detail,
+                "price":   round(price, 2),
+            }
+
+        except Exception as e:
+            context[label] = {"trend": "UNKNOWN", "warning": False,
+                              "detail": f"Error: {str(e)[:50]}"}
+
+    return context
+
+
+def get_sector_momentum(sector):
+    """
+    Check if the stock's sector ETF is trending up or down.
+    Returns a short string summary.
+    """
+    etf = SECTOR_ETF_MAP.get(sector)
+    if not etf:
+        return "Sector ETF not mapped — manual check recommended"
+
+    try:
+        df = yf.download(etf, period="1mo", interval="1d",
+                         progress=False, auto_adjust=True)
+        if df.empty or len(df) < 10:
+            return f"{etf}: No data"
+
+        df["EMA9"]  = ta.trend.EMAIndicator(df["Close"], window=9).ema_indicator()
+        df["EMA21"] = ta.trend.EMAIndicator(df["Close"], window=21).ema_indicator()
+
+        latest  = df.iloc[-1]
+        price   = float(latest["Close"])
+        ema9    = float(latest["EMA9"])
+        ema21   = float(latest["EMA21"])
+
+        # 1-month return
+        month_return = round((price - float(df["Close"].iloc[0])) / float(df["Close"].iloc[0]) * 100, 2)
+        momentum = "BULLISH" if ema9 > ema21 else "BEARISH"
+
+        return (f"{etf}: {momentum} | "
+                f"EMA9 {'>' if ema9 > ema21 else '<'} EMA21 | "
+                f"1M return: {'+' if month_return >= 0 else ''}{month_return}%")
+
+    except Exception as e:
+        return f"{etf}: Error — {str(e)[:50]}"
+
+
+def get_earnings_warning(ticker):
+    """
+    Check if the stock has earnings scheduled within the next 5 trading days.
+    Returns (has_upcoming_earnings: bool, detail: str)
+    """
+    try:
+        stock    = yf.Ticker(ticker)
+        calendar = stock.calendar
+
+        if calendar is None or calendar.empty:
+            return False, "Earnings date: Not available"
+
+        # calendar is a DataFrame with dates as columns
+        if "Earnings Date" in calendar.index:
+            earn_dates = calendar.loc["Earnings Date"]
+        elif hasattr(calendar, "columns") and len(calendar.columns) > 0:
+            earn_dates = calendar.iloc[0]
+        else:
+            return False, "Earnings date: Not available"
+
+        today = pd.Timestamp.now().normalize()
+
+        for val in earn_dates:
+            try:
+                earn_date = pd.Timestamp(val).normalize()
+                days_away = (earn_date - today).days
+                if 0 <= days_away <= 5:
+                    return True, f"⚠️ EARNINGS IN {days_away} DAY(S): {earn_date.strftime('%b %d, %Y')}"
+                elif 6 <= days_away <= 14:
+                    return False, f"Earnings in {days_away} days: {earn_date.strftime('%b %d, %Y')}"
+            except Exception:
+                continue
+
+        return False, "No earnings within 14 days"
+
+    except Exception as e:
+        return False, f"Earnings check unavailable: {str(e)[:50]}"
+
+
+def get_volume_confirmation(df):
+    """
+    Check if today's volume confirms the move.
+    Returns (confirmed: bool, detail: str)
+    """
+    try:
+        avg_vol  = int(df["Volume"].iloc[-20:].mean())
+        last_vol = int(df["Volume"].iloc[-1])
+        ratio    = round(last_vol / avg_vol * 100) if avg_vol > 0 else 0
+
+        if ratio >= 150:
+            return True,  f"STRONG ({ratio}% of 20d avg — high conviction)"
+        elif ratio >= 100:
+            return True,  f"ABOVE AVERAGE ({ratio}% of 20d avg — confirmed)"
+        elif ratio >= 75:
+            return False, f"AVERAGE ({ratio}% of 20d avg — acceptable)"
+        else:
+            return False, f"WEAK ({ratio}% of 20d avg — low conviction, be cautious)"
+
+    except Exception:
+        return False, "Volume data unavailable"
+
+
+# ============================================================
 # TECHNICAL ANALYSIS
 # ============================================================
 
@@ -406,6 +612,14 @@ def analyze_ticker(ticker):
 
         currency = "CAD" if ticker.endswith(".TO") else "USD"
 
+        # --- Phase 2: Market Intelligence ---
+        has_earnings, earnings_detail = get_earnings_warning(ticker)
+        vol_confirmed, vol_detail     = get_volume_confirmation(df)
+        sector_detail = get_sector_momentum(info.get("sector", ""))
+
+        earnings_flag = "⚠️ HIGH RISK — EARNINGS IMMINENT" if has_earnings else ""
+        volume_flag   = "" if vol_confirmed else "⚠️ LOW VOLUME — weak conviction"
+
         # --- Shariah Compliance ---
         print(f"     ☪  Running Shariah screen for {ticker}...")
         shariah = shariah_screen(ticker)
@@ -443,6 +657,11 @@ FUNDAMENTAL DATA:
   Revenue Growth:   {rev_growth}
   Analyst Rating:   {rating}
   Analyst Target:   {target}
+
+PHASE 2 — SIGNAL FILTERS:
+  Earnings Warning: {earnings_detail} {earnings_flag}
+  Volume Signal:    {vol_detail} {volume_flag}
+  Sector Momentum:  {sector_detail}
 {shariah_block}
 """
         return summary
@@ -488,7 +707,7 @@ Provide your full daily trading report now."""
 # EMAIL
 # ============================================================
 
-def send_email(report, perf_summary, recent_trades):
+def send_email(report, perf_summary, recent_trades, sp500, tsx, market_warning):
     """Send the daily report as a formatted HTML email"""
     today_str = datetime.now().strftime("%A, %B %d, %Y")
     subject   = f"📈 Daily Trade Signals — {today_str}"
@@ -510,6 +729,12 @@ def send_email(report, perf_summary, recent_trades):
   <div style="background:#f4f6f7;border-left:4px solid #154360;padding:12px 16px;border-radius:4px;margin-bottom:24px;">
     <strong>How to use this report:</strong> Review each signal before market open.
     Enter only trades that match your risk tolerance. Always respect your stop loss.
+  </div>
+  <div style="background:{'#fdf2f2' if market_warning else '#f0fdf4'};border-left:4px solid {'#e74c3c' if market_warning else '#2ecc71'};padding:12px 16px;border-radius:4px;margin-bottom:24px;font-size:13px;">
+    <strong>🌍 Market Context:</strong><br>
+    S&P 500: <strong>{sp500.get('trend','?')}</strong> — {sp500.get('detail','')}<br>
+    TSX: <strong>{tsx.get('trend','?')}</strong> — {tsx.get('detail','')}
+    {'<br><strong>⚠️ MARKET HEADWIND ACTIVE — exercise extra caution on LONG signals today</strong>' if market_warning else ''}
   </div>
   <div style="background:#fef9f0;border-left:4px solid #d4a017;padding:12px 16px;border-radius:4px;margin-bottom:24px;font-size:13px;">
     <strong>☪️ Shariah Compliance Legend (AAOIFI Standard):</strong><br>
@@ -610,7 +835,23 @@ def main():
     all_tickers = WATCHLIST["US"] + WATCHLIST["TSX"]
     print(f"📊 Watchlist: {len(all_tickers)} tickers\n")
 
-    summaries = []
+    # --- Phase 2: Fetch market context once for the whole session ---
+    print("🌍 Fetching market context (S&P 500 + TSX)...")
+    market_ctx = get_market_context()
+    sp500  = market_ctx.get("SP500", {})
+    tsx    = market_ctx.get("TSX",   {})
+
+    market_block = f"""
+{'='*55}
+MARKET CONTEXT (checked before individual stocks)
+  S&P 500 : {sp500.get('trend', 'UNKNOWN')} — {sp500.get('detail', '')}
+  TSX     : {tsx.get('trend',  'UNKNOWN')} — {tsx.get('detail',  '')}
+{'⚠️  MARKET WARNING: Broad market is BEARISH — apply headwind labels to LONG signals' if sp500.get('warning') or tsx.get('warning') else '✅  Market conditions are neutral to bullish'}
+{'='*55}
+"""
+    print(market_block)
+
+    summaries = [market_block]
     for ticker in all_tickers:
         print(f"  → Fetching {ticker}...")
         result = analyze_ticker(ticker)
@@ -637,8 +878,10 @@ def main():
     perf_summary  = generate_performance_summary()
     recent_trades = get_recent_closed_trades(10)
 
+    market_warning = sp500.get("warning", False) or tsx.get("warning", False)
+
     print("📧 Sending email...")
-    send_email(report, perf_summary, recent_trades)
+    send_email(report, perf_summary, recent_trades, sp500, tsx, market_warning)
 
     print("✅ Done!")
 
