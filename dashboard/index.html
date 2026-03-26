@@ -80,6 +80,7 @@ canvas{display:block;}
     <input id="SI" type="text" placeholder="Ticker e.g. AAPL" onkeydown="if(event.key==='Enter')go(this.value)">
   </div>
   <button class="ba" onclick="go(document.getElementById('SI').value)">ANALYSE</button>
+  <button class="bo" id="SCANBTN" onclick="scanAll()" style="white-space:nowrap;">&#9654; SCAN ALL</button>
   <button class="bo" onclick="openM()">API KEY</button>
 </div>
 <aside id="SB"></aside>
@@ -328,20 +329,40 @@ function drawAll(data,sig){
 }
 
 // ── SIGNAL ESTIMATE ───────────────────────────────────────
+// ── SIGNAL CONFIG ─────────────────────────────────────────
+const MIN_BULL_SCORE = 4;   // Require ALL 4 indicators bullish
+const MIN_PROB       = 70;  // Minimum probability %
+const LONG_ONLY      = true; // Never show short signals
+
 function estSig(price,e9v,e21v,e50v,rsiV,candles){
-  let b=0,s=0;
-  if(e9v>e21v&&e21v>e50v)b++;else if(e9v<e21v&&e21v<e50v)s++;
-  if(price>e50v)b++;else s++;
-  if(rsiV>50&&rsiV<70)b++;else if(rsiV<50&&rsiV>30)s++;
-  const lc=candles[candles.length-1];if(lc.c>lc.o)b++;else s++;
-  const dir=b>=3?"LONG":s>=3?"SHORT":null;if(!dir)return null;
-  const lows=candles.slice(-30).map(c=>c.l).sort((a,b)=>a-b);
-  const highs=candles.slice(-30).map(c=>c.h).sort((a,b)=>b-a);
-  const sup=lows[Math.floor(lows.length*.15)],res=highs[Math.floor(highs.length*.15)];
-  let stop,tp1,tp2;
-  if(dir==="LONG"){stop=+(sup*.99).toFixed(2);const r=price-stop;tp1=+(price+r*2).toFixed(2);tp2=+(price+r*3).toFixed(2);}
-  else{stop=+(res*1.01).toFixed(2);const r=stop-price;tp1=+(price-r*2).toFixed(2);tp2=+(price-r*3).toFixed(2);}
-  return{dir,entry:+price.toFixed(2),stop,tp1,tp2,rr:+Math.abs((tp1-price)/(price-stop)).toFixed(1),prob:Math.min(50+(Math.max(b,s)-2)*12,82),score:Math.max(b,s)};
+  let b=0;
+  // All 4 must pass for a valid LONG signal
+  const sig1 = e9v>e21v&&e21v>e50v;          // EMA alignment bullish
+  const sig2 = price>e50v;                    // Price above EMA50
+  const sig3 = rsiV>45&&rsiV<70;             // RSI bullish momentum (not overbought)
+  const lc   = candles[candles.length-1];
+  const sig4 = lc.c>lc.o;                    // Last candle bullish
+
+  if(sig1)b++;if(sig2)b++;if(sig3)b++;if(sig4)b++;
+
+  // Must meet minimum score threshold — no shorts
+  if(b<MIN_BULL_SCORE)return null;
+
+  const prob=Math.min(60+b*8,88);
+  if(prob<MIN_PROB)return null;
+
+  const lows=candles.slice(-30).map(c=>c.l).sort((a,b2)=>a-b2);
+  const sup=lows[Math.floor(lows.length*.15)];
+  const stop=+(sup*.99).toFixed(2);
+  const r=price-stop;
+  if(r<=0)return null;
+  const tp1=+(price+r*2).toFixed(2);
+  const tp2=+(price+r*3).toFixed(2);
+  const rr=+Math.abs((tp1-price)/(price-stop)).toFixed(1);
+  if(rr<2)return null; // Enforce 1:2 minimum R:R
+
+  return{dir:"LONG",entry:+price.toFixed(2),stop,tp1,tp2,rr,prob,score:b,
+         signals:{emaAlign:sig1,aboveEma50:sig2,rsiMomentum:sig3,bullCandle:sig4}};
 }
 
 // ── MAIN GO ───────────────────────────────────────────────
@@ -391,8 +412,40 @@ async function go(sym){
     document.getElementById("PT").innerHTML=`<div class="row"><span class="lbl">RSI (14)</span><span class="val ${rsiV<30?"up":rsiV>70?"dn":""}">${rsiV}</span></div><div class="row"><span class="lbl">EMA 9</span><span class="val">${e9v}</span></div><div class="row"><span class="lbl">EMA 21</span><span class="val">${e21v}</span></div><div class="row"><span class="lbl">EMA 50</span><span class="val">${e50v}</span></div><div class="row"><span class="lbl">EMA Align</span><span class="val ${ac}">${al}</span></div><div class="row"><span class="lbl">vs EMA 50</span><span class="val ${price>e50v?"up":"dn"}">${price>e50v?"ABOVE":"BELOW"}</span></div><div class="row"><span class="lbl">Vol vs Avg</span><span class="val ${volR>=100?"up":"wn"}">${volR}%</span></div>`;
 
     const sig=estSig(price,e9v,e21v,e50v,rsiV,candles);
-    if(!sig){document.getElementById("PG").innerHTML='<span class="lbl">No clear signal &mdash; indicators mixed.</span>';}
-    else{document.getElementById("PG").innerHTML=`<div class="sdir"><span class="sdl ${sig.dir==="LONG"?"long":"short"}">${sig.dir==="LONG"?"&uarr;":"&darr;"} ${sig.dir}</span><span class="lbl">${sig.score}/4 signals</span></div><div class="row"><span class="lbl">Entry</span><span class="val">${cs}${sig.entry}</span></div><div class="row"><span class="lbl">Stop Loss</span><span class="val dn">${cs}${sig.stop}</span></div><div class="row"><span class="lbl">TP1</span><span class="val up">${cs}${sig.tp1}</span></div><div class="row"><span class="lbl">TP2</span><span class="val up">${cs}${sig.tp2}</span></div><div class="row"><span class="lbl">Risk / Reward</span><span class="val wn">1 : ${sig.rr}</span></div><div class="row"><span class="lbl">Probability</span><span class="val" style="color:var(--amber)">${sig.prob}%</span></div><div class="note" style="margin-top:5px">Run Claude for full analysis</div>`;}
+    if(!sig){
+      const e9v2=e9a[n],e21v2=e21a[n],e50v2=e50a[n],rsiV2=rsi14[n];
+      const s1=e9v2>e21v2&&e21v2>e50v2,s2=price>e50v2,s3=rsiV2>45&&rsiV2<70,s4=candles[n].c>candles[n].o;
+      const passed=[s1,s2,s3,s4].filter(Boolean).length;
+      const tick=(v)=>v?'<span style="color:#00d084">&#10003;</span>':'<span style="color:#ff4757">&#10007;</span>';
+      document.getElementById("PG").innerHTML=`
+        <div style="color:var(--muted);font-size:10px;margin-bottom:8px">No qualifying LONG signal &mdash; ${passed}/4 criteria met</div>
+        <div style="background:#0d1219;border-radius:6px;padding:8px;font-size:10px;line-height:1.9;">
+          ${tick(s1)} EMA 9 &gt; 21 &gt; 50 (bullish alignment)<br>
+          ${tick(s2)} Price above EMA 50<br>
+          ${tick(s3)} RSI 45&ndash;70 (momentum zone)<br>
+          ${tick(s4)} Last candle bullish
+        </div>`;
+    }
+    else{
+      const chk=sig.signals||{};
+      const tick=(v)=>v?'<span style="color:#00d084">&#10003;</span>':'<span style="color:#ff4757">&#10007;</span>';
+      document.getElementById("PG").innerHTML=`
+        <div class="sdir">
+          <span class="sdl long">&uarr; LONG &mdash; ${sig.prob}% probability</span>
+        </div>
+        <div style="background:#0d1219;border-radius:6px;padding:8px;margin-bottom:10px;font-size:10px;line-height:1.9;">
+          ${tick(chk.emaAlign)} EMA 9 &gt; 21 &gt; 50 (bullish alignment)<br>
+          ${tick(chk.aboveEma50)} Price above EMA 50<br>
+          ${tick(chk.rsiMomentum)} RSI 45&ndash;70 (momentum zone)<br>
+          ${tick(chk.bullCandle)} Last candle bullish (close &gt; open)
+        </div>
+        <div class="row"><span class="lbl">Entry</span><span class="val">${cs}${sig.entry}</span></div>
+        <div class="row"><span class="lbl">Stop Loss</span><span class="val dn">${cs}${sig.stop}</span></div>
+        <div class="row"><span class="lbl">TP1</span><span class="val up">${cs}${sig.tp1}</span></div>
+        <div class="row"><span class="lbl">TP2</span><span class="val up">${cs}${sig.tp2}</span></div>
+        <div class="row"><span class="lbl">Risk / Reward</span><span class="val wn">1 : ${sig.rr}</span></div>
+        <div class="note" style="margin-top:5px">All 4 signals confirmed &mdash; run Claude for full analysis</div>`;
+    }
 
     LAST_DATA={candles,e9a,e21a,e50a,rsi14};LAST_SIG=sig;
     drawAll(LAST_DATA,LAST_SIG);
@@ -401,6 +454,59 @@ async function go(sym){
   }catch(err){
     document.getElementById("TB").innerHTML=`<span style="color:var(--red);font-size:12px">&#10007; ${sym}: ${err.message}</span>`;
     console.error(err);
+  }
+}
+
+// ── SCAN ALL TICKERS ─────────────────────────────────────
+let scanRunning=false;
+
+async function scanAll(){
+  if(scanRunning)return;
+  scanRunning=true;
+  const btn=document.getElementById("SCANBTN");
+  btn.textContent="SCANNING...";btn.disabled=true;
+
+  // Reset all sidebar dots to grey
+  document.querySelectorAll(".dot").forEach(d=>d.className="dot");
+  // Add gold ring to signal qualifying tickers
+  const qualified=[];
+
+  const allTickers=Object.values(WL).flat();
+  for(const sym of allTickers){
+    try{
+      const res=await fetchD(sym);
+      const meta=res.meta,ts=res.timestamp,q=res.indicators.quote[0];
+      const candles=ts.map((t,i)=>({t,o:q.open[i]?+q.open[i].toFixed(2):null,h:q.high[i]?+q.high[i].toFixed(2):null,l:q.low[i]?+q.low[i].toFixed(2):null,c:q.close[i]?+q.close[i].toFixed(2):null})).filter(c=>c.o&&c.h&&c.l&&c.c);
+      if(candles.length<60)continue;
+      const closes=candles.map(c=>c.c);
+      const n=candles.length-1;
+      const e9v=ema(closes,9)[n],e21v=ema(closes,21)[n],e50v=ema(closes,50)[n],rsiV=rsiCalc(closes,14)[n];
+      const price=meta.regularMarketPrice||closes[n];
+      const sig=estSig(price,e9v,e21v,e50v,rsiV,candles);
+      const dot=document.getElementById("dt_"+sym);
+      if(sig){
+        qualified.push({sym,sig,price});
+        if(dot){dot.className="dot c";dot.style.boxShadow="0 0 6px #00d084";}
+        const sbi=document.getElementById("sb_"+sym);
+        if(sbi)sbi.style.background="rgba(0,208,132,0.06)";
+      } else {
+        if(dot){dot.className="dot";dot.style.boxShadow="";}
+        const sbi=document.getElementById("sb_"+sym);
+        if(sbi)sbi.style.background="";
+      }
+    }catch{continue;}
+  }
+
+  scanRunning=false;
+  btn.textContent="&#9654; SCAN ALL";btn.disabled=false;
+
+  if(qualified.length===0){
+    alert("No tickers meet all 4 criteria today. Market may be weak or overbought.");
+  } else {
+    // Auto-load the highest probability qualifying ticker
+    const best=qualified.sort((a,b)=>b.sig.prob-a.sig.prob)[0];
+    alert(`Scan complete! ${qualified.length} ticker(s) qualify:\n${qualified.map(q=>q.sym+" ("+q.sig.prob+"%)").join(", ")}\n\nLoading best: ${best.sym}`);
+    go(best.sym);
   }
 }
 
