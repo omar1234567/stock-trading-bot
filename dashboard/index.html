@@ -514,17 +514,162 @@ async function scanAll(){
 async function runC(){
   const key=localStorage.getItem("apiKey");if(!key){openM();return;}if(!TICKER)return;
   const btn=document.getElementById("AB"),out=document.getElementById("AO");
-  btn.disabled=true;btn.textContent="ANALYSING...";out.textContent="";
+  btn.disabled=true;btn.textContent="ANALYSING...";
+  out.innerHTML='<div style="color:var(--muted);font-size:10px;line-height:2">&#9679; Fetching live market data...<br>&#9679; Searching latest news...<br>&#9679; Running professional audit...</div>';
+
   try{
-    const res=await fetchD(TICKER);const q=res.indicators.quote[0];
-    const closes=res.timestamp.map((_,i)=>q.close[i]).filter(Boolean);const n=closes.length-1;
-    const e9v=ema(closes,9)[n],e21v=ema(closes,21)[n],e50v=ema(closes,50)[n],rsiV=rsiCalc(closes,14)[n];
-    const price=res.meta.regularMarketPrice;
+    // Pull latest price data
+    const res=await fetchD(TICKER);
+    const q=res.indicators.quote[0];
+    const ts=res.timestamp;
+    const closes=ts.map((_,i)=>q.close[i]).filter(Boolean);
+    const highs=ts.map((_,i)=>q.high[i]).filter(Boolean);
+    const lows=ts.map((_,i)=>q.low[i]).filter(Boolean);
+    const vols=ts.map((_,i)=>q.volume[i]).filter(Boolean);
+    const n=closes.length-1;
+
+    // Indicators
+    const e9v=ema(closes,9)[n],e21v=ema(closes,21)[n],e50v=ema(closes,50)[n];
+    const e200arr=ema(closes,200);
+    const e200v=e200arr[n]||"N/A";
+    const rsiArr=rsiCalc(closes,14);
+    const rsiV=rsiArr[n];
+    const price=res.meta.regularMarketPrice||closes[n];
+    const w52h=res.meta.fiftyTwoWeekHigh,w52l=res.meta.fiftyTwoWeekLow;
+    const avgVol=vols.slice(-20).reduce((a,b)=>a+b,0)/20;
+    const lastVol=vols[vols.length-1]||0;
+    const volRatio=avgVol>0?Math.round(lastVol/avgVol*100):0;
     const al=e9v>e21v&&e21v>e50v?"BULLISH":e9v<e21v&&e21v<e50v?"BEARISH":"MIXED";
-    const r=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json","x-api-key":key,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:380,messages:[{role:"user",content:`Analyze ${TICKER} for a Shariah-compliant swing trader.\nData: Price $${price.toFixed(2)}, RSI ${rsiV}, EMA9 ${e9v}, EMA21 ${e21v}, EMA50 ${e50v}, Trend ${al}\n\nFormat:\nDIRECTION: [LONG / SHORT / NO TRADE]\nCONVICTION: [1-5 stars]\nSHARIAH: [COMPLIANT / DOUBTFUL] - reason\nSETUP: [2 sentences]\nRISK: [1 sentence]\nPROBABILITY: [X%]`}]})});
+
+    // Last 5 candles summary
+    const last5=ts.slice(-5).map((_,i)=>{
+      const idx=ts.length-5+i;
+      const d=new Date(ts[idx]*1000);
+      const dt=(d.getMonth()+1)+"/"+(d.getDate());
+      const o=q.open[idx]?.toFixed(2),h=q.high[idx]?.toFixed(2),l=q.low[idx]?.toFixed(2),c=q.close[idx]?.toFixed(2);
+      const dir=parseFloat(c)>=parseFloat(o)?"BULL":"BEAR";
+      return `${dt}: O:${o} H:${h} L:${l} C:${c} [${dir}]`;
+    }).join("\n");
+
+    // RSI trend (last 5)
+    const rsiTrend=rsiArr.slice(-5).filter(Boolean).map(v=>v?.toFixed(1)).join(" → ");
+
+    // Support/Resistance
+    const recent50Lows=[...lows].slice(-50).sort((a,b)=>a-b);
+    const recent50Highs=[...highs].slice(-50).sort((a,b)=>b-a);
+    const support1=recent50Lows[Math.floor(recent50Lows.length*.1)]?.toFixed(2);
+    const support2=recent50Lows[Math.floor(recent50Lows.length*.2)]?.toFixed(2);
+    const resist1=recent50Highs[Math.floor(recent50Highs.length*.1)]?.toFixed(2);
+    const resist2=recent50Highs[Math.floor(recent50Highs.length*.2)]?.toFixed(2);
+
+    const cur=TICKER.endsWith(".TO")?"CAD":"USD";
+    const shortName=res.meta.shortName||TICKER;
+
+    const systemPrompt=`You are a senior professional stock analyst with 20+ years experience in both technical analysis and fundamental research. You specialize in Shariah-compliant investing and swing/position trading.
+
+Your job is to provide a comprehensive, honest, and professional trade audit — the same quality analysis a top-tier hedge fund analyst would produce. Be specific, cite exact price levels, and give a clear final verdict.`;
+
+    const userPrompt=`Perform a full professional trade audit for ${TICKER} (${shortName}) — ${cur}.
+
+=== TECHNICAL DATA ===
+Current Price: $${price.toFixed(2)} ${cur}
+52-Week Range: $${w52l?.toFixed(2)} – $${w52h?.toFixed(2)}
+Price vs 52W High: ${w52h?((price/w52h-1)*100).toFixed(1):"N/A"}%
+
+Moving Averages:
+  EMA 9:   $${e9v}
+  EMA 21:  $${e21v}
+  EMA 50:  $${e50v}
+  EMA 200: $${typeof e200v==="number"?e200v.toFixed(2):e200v}
+  Alignment: ${al}
+  Price vs EMA 50: ${price>e50v?"ABOVE (bullish)":"BELOW (bearish)"}
+  Price vs EMA 200: ${typeof e200v==="number"?price>e200v?"ABOVE (long-term bullish)":"BELOW (long-term bearish)":"N/A"}
+
+RSI (14): ${rsiV} | Trend last 5 days: ${rsiTrend}
+Volume: ${lastVol?.toLocaleString()} | vs 20d avg: ${volRatio}%
+
+Key Levels:
+  Support 1: $${support1} | Support 2: $${support2}
+  Resistance 1: $${resist1} | Resistance 2: $${resist2}
+
+Last 5 Daily Candles:
+${last5}
+
+=== YOUR TASK ===
+Use your web search tool to find:
+1. Latest analyst ratings, price targets, and upgrades/downgrades for ${TICKER}
+2. Recent earnings results or upcoming earnings date
+3. Key recent news in the last 2 weeks affecting ${TICKER} or its sector
+4. Any macro factors affecting this stock right now
+
+Then deliver a FULL PROFESSIONAL AUDIT in this exact format:
+
+━━━ TECHNICAL AUDIT ━━━
+TREND: [Describe the primary trend with specific EMA and price level analysis]
+MOMENTUM: [RSI analysis — is momentum building, fading, or diverging?]
+KEY LEVELS: [Specific support and resistance levels to watch]
+CANDLESTICK PATTERN: [Any notable patterns in the last 5 candles]
+VOLUME: [What volume is telling us — conviction or weakness?]
+TECHNICAL VERDICT: [STRONG BUY / BUY / NEUTRAL / AVOID] with one clear sentence why
+
+━━━ FUNDAMENTAL AUDIT ━━━
+RECENT NEWS: [2-3 most important recent developments from your search]
+EARNINGS: [Latest earnings result or upcoming date and expectation]
+ANALYST CONSENSUS: [Current ratings, average price target, recent changes]
+SECTOR OUTLOOK: [How is the broader sector trending right now?]
+FUNDAMENTAL VERDICT: [STRONG / SUPPORTIVE / NEUTRAL / CONCERNING] with one clear sentence why
+
+━━━ SHARIAH COMPLIANCE ━━━
+STATUS: [COMPLIANT / DOUBTFUL / NON-COMPLIANT]
+REASON: [Specific reason based on business activity and known financial ratios]
+NOTE: [Any compliance concerns to monitor]
+
+━━━ FINAL TRADE VERDICT ━━━
+SIGNAL: [LONG / NO TRADE — absolutely no short recommendations]
+CONVICTION: [HIGH / MEDIUM / LOW]
+PROBABILITY OF SUCCESS: [X%]
+ENTRY ZONE: [$X.XX – $X.XX]
+STOP LOSS: [$X.XX — with specific chart reason]
+TARGET 1: [$X.XX — with specific chart reason]
+TARGET 2: [$X.XX — with specific chart reason]
+HOLD PERIOD: [Expected days/weeks]
+SUMMARY: [3-4 sentences. Professional final assessment integrating both technical and fundamental. Be honest — if this is not a good trade, say so clearly.]`;
+
+    const r=await fetch("https://api.anthropic.com/v1/messages",{
+      method:"POST",
+      headers:{"Content-Type":"application/json","x-api-key":key,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
+      body:JSON.stringify({
+        model:"claude-sonnet-4-6",
+        max_tokens:1800,
+        system:systemPrompt,
+        tools:[{"type":"web_search_20250305","name":"web_search"}],
+        messages:[{role:"user",content:userPrompt}]
+      })
+    });
+
     if(!r.ok){const e=await r.json();throw new Error(e.error?.message||"API error");}
-    const d=await r.json();out.textContent=d.content[0].text;
-  }catch(e){out.textContent="Error: "+e.message;}
+    const d=await r.json();
+
+    // Extract text from content blocks (may include tool_use blocks)
+    const textBlocks=d.content.filter(b=>b.type==="text").map(b=>b.text).join("\n");
+    if(!textBlocks)throw new Error("No analysis returned");
+
+    // Format output with section highlighting
+    const formatted=textBlocks
+      .replace(/━━━ (.*?) ━━━/g, '<div style="margin:12px 0 6px;font-weight:700;color:var(--amber);font-size:10px;letter-spacing:1px;border-bottom:1px solid #1e2a35;padding-bottom:3px">$1</div>')
+      .replace(/^(TREND|MOMENTUM|KEY LEVELS|CANDLESTICK PATTERN|VOLUME|TECHNICAL VERDICT|RECENT NEWS|EARNINGS|ANALYST CONSENSUS|SECTOR OUTLOOK|FUNDAMENTAL VERDICT|STATUS|REASON|NOTE|SIGNAL|CONVICTION|PROBABILITY OF SUCCESS|ENTRY ZONE|STOP LOSS|TARGET 1|TARGET 2|HOLD PERIOD|SUMMARY):/gm, '<span style="color:var(--text);font-weight:700">$1:</span>')
+      .replace(/(STRONG BUY|BUY)/g,'<span style="color:var(--green);font-weight:700">$1</span>')
+      .replace(/(AVOID|NEUTRAL)/g,'<span style="color:var(--amber);font-weight:700">$1</span>')
+      .replace(/NO TRADE/g,'<span style="color:var(--red);font-weight:700">NO TRADE</span>')
+      .replace(/\bLONG\b/g,'<span style="color:var(--green);font-weight:700">LONG</span>')
+      .replace(/(COMPLIANT)/g,'<span style="color:var(--green)">$1</span>')
+      .replace(/(NON-COMPLIANT)/g,'<span style="color:var(--red)">$1</span>')
+      .replace(/(DOUBTFUL)/g,'<span style="color:var(--amber)">$1</span>')
+      .replace(/\n/g,"<br>");
+
+    out.innerHTML=`<div style="font-size:10px;line-height:1.8;color:#aabbcc;">${formatted}</div>`;
+
+  }catch(e){out.textContent="Error: "+e.message;console.error(e);}
   finally{btn.disabled=false;btn.textContent="&#9889; RUN CLAUDE ANALYSIS";}
 }
 
