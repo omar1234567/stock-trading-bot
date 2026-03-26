@@ -1,6 +1,3 @@
-Index · HTML
-Copy
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -831,13 +828,41 @@ async function loadTicker(ticker) {
 // YAHOO FINANCE DATA
 // ============================================================
 async function fetchYahooData(ticker) {
-  const yTicker = ticker;   // Yahoo uses same format incl .TO
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${yTicker}?interval=1d&range=1y`;
-  const proxy = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`;
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?interval=1d&range=1y&includePrePost=false`;
  
-  const res  = await fetch(proxy);
-  const json = await res.json();
-  const raw  = JSON.parse(json.contents);
+  // Try multiple CORS proxies in order until one works
+  const proxies = [
+    `https://corsproxy.io/?${encodeURIComponent(url)}`,
+    `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`,
+    `https://thingproxy.freeboard.io/fetch/${url}`,
+  ];
+ 
+  let raw = null;
+  let lastErr = '';
+ 
+  for (const proxy of proxies) {
+    try {
+      const controller = new AbortController();
+      const tid = setTimeout(() => controller.abort(), 8000);
+      const res = await fetch(proxy, { signal: controller.signal });
+      clearTimeout(tid);
+      if (!res.ok) continue;
+      const text = await res.text();
+      try {
+        const json = JSON.parse(text);
+        raw = json.contents ? JSON.parse(json.contents) : json;
+      } catch {
+        raw = JSON.parse(text);
+      }
+      if (raw?.chart?.result?.[0]) break;
+      raw = null;
+    } catch (e) {
+      lastErr = e.message;
+      continue;
+    }
+  }
+ 
+  if (!raw) throw new Error(`All data sources failed. ${lastErr}`);
  
   const result = raw?.chart?.result?.[0];
   if (!result) throw new Error('No chart data');
@@ -1209,3 +1234,4 @@ document.getElementById('apiModal').addEventListener('click', function(e) {
 </script>
 </body>
 </html>
+
