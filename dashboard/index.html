@@ -57,6 +57,12 @@ canvas{display:block;}
 .abtn:hover{opacity:.88;}.abtn:disabled{opacity:.4;cursor:not-allowed;}
 .aout{font-size:10px;line-height:1.7;color:#8899aa;white-space:pre-wrap;margin-top:8px;}
 .spin{width:16px;height:16px;border:2px solid var(--border);border-top-color:var(--amber);border-radius:50%;animation:sp .7s linear infinite;display:inline-block;}
+.regime-bull{background:rgba(0,208,132,.12);color:var(--green);border:1px solid rgba(0,208,132,.3);padding:4px 10px;border-radius:4px;font-size:10px;font-weight:700;}
+.regime-bear{background:rgba(255,71,87,.12);color:var(--red);border:1px solid rgba(255,71,87,.3);padding:4px 10px;border-radius:4px;font-size:10px;font-weight:700;}
+.regime-side{background:rgba(245,166,35,.12);color:var(--amber);border:1px solid rgba(245,166,35,.3);padding:4px 10px;border-radius:4px;font-size:10px;font-weight:700;}
+.ps-input{width:100%;background:var(--bg3);border:1px solid var(--border);border-radius:5px;padding:6px 9px;color:var(--text);font-family:"Space Mono",monospace;font-size:11px;outline:none;margin-top:4px;}
+.ps-input:focus{border-color:var(--amber);}
+.ps-result{background:var(--bg3);border-radius:6px;padding:8px 10px;margin-top:8px;font-size:11px;line-height:1.8;}
 @keyframes sp{to{transform:rotate(360deg);}}
 .mbg{display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:999;align-items:center;justify-content:center;}
 .mbg.show{display:flex;}
@@ -73,6 +79,7 @@ canvas{display:block;}
 </style>
 </head>
 <body>
+<div id="REGIME_BAR" style="position:fixed;top:54px;left:180px;right:230px;height:28px;display:flex;align-items:center;gap:10px;padding:0 14px;background:#080c10;border-bottom:1px solid #1e2a35;z-index:9;font-size:10px;"></div>
 <div id="nav">
   <div class="logo">HALAL<span>TRADER</span></div>
   <div class="sb2">
@@ -107,6 +114,30 @@ canvas{display:block;}
   <div class="rps"><div class="rpt">Shariah Status</div><div id="PS"><span class="lbl">Select a ticker</span></div></div>
   <div class="rps"><div class="rpt">Trade Signal</div><div id="PG"><span class="lbl">Select a ticker</span></div></div>
   <div class="rps"><div class="rpt">Technicals</div><div id="PT"><span class="lbl">Select a ticker</span></div></div>
+  <div class="rps">
+    <div class="rpt">&#9650; Market Regime</div>
+    <div id="MREG"><span class="lbl">Loading...</span></div>
+  </div>
+  <div class="rps">
+    <div class="rpt">&#9632; Position Sizing</div>
+    <div id="PSIZ">
+      <div style="font-size:10px;color:var(--muted);margin-bottom:6px">Set your account size to calculate exact share count</div>
+      <div style="margin-bottom:6px">
+        <div class="lbl" style="margin-bottom:3px">Account Size</div>
+        <input class="ps-input" id="PS_ACCT" type="number" placeholder="e.g. 50000" value="" oninput="calcPositionSize()">
+      </div>
+      <div style="margin-bottom:6px">
+        <div class="lbl" style="margin-bottom:3px">Max Risk Per Trade</div>
+        <select class="ps-input" id="PS_RISK" onchange="calcPositionSize()">
+          <option value="0.5">0.5% (Conservative)</option>
+          <option value="1" selected>1% (Standard)</option>
+          <option value="1.5">1.5% (Moderate)</option>
+          <option value="2">2% (Aggressive)</option>
+        </select>
+      </div>
+      <div id="PS_OUT"></div>
+    </div>
+  </div>
   <div class="rps"><div class="rpt">&#9671; Performance Intel</div><div id="PERF"><span class="lbl">Select a ticker</span></div></div>
   <div class="rps">
     <div class="rpt">Claude Analysis</div>
@@ -139,10 +170,10 @@ let TICKER=null,LAST_DATA=null,LAST_SIG=null;
 // ── LAYOUT ────────────────────────────────────────────────
 function layout(){
   const W=window.innerWidth,H=window.innerHeight;
-  const cw=W-SBW-RPW, ch=H-NAV-TBAR-RSI_H;
-  document.getElementById("TB").style.cssText=`position:fixed;top:${NAV}px;left:${SBW}px;right:${RPW}px;height:${TBAR}px;background:var(--bg2);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:18px;padding:0 16px;z-index:10;`;
+  const cw=W-SBW-RPW, ch=H-NAV-28-TBAR-RSI_H;
+  document.getElementById("TB").style.cssText=`position:fixed;top:${NAV+28}px;left:${SBW}px;right:${RPW}px;height:${TBAR}px;background:var(--bg2);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:18px;padding:0 16px;z-index:10;`;
   const ca=document.getElementById("CAREA");
-  ca.style.cssText=`position:fixed;top:${NAV+TBAR}px;left:${SBW}px;width:${cw}px;height:${ch+RSI_H}px;`;
+  ca.style.cssText=`position:fixed;top:${NAV+28+TBAR}px;left:${SBW}px;width:${cw}px;height:${ch+RSI_H}px;`;
   const cv=document.getElementById("CV");
   cv.width=cw; cv.height=ch;
   const rv=document.getElementById("RV");
@@ -405,6 +436,176 @@ async function getSectorMomentum(ticker){
   }catch{return{score:0,label:"N/A",etf,ret20:0};}
 }
 
+// ── MARKET REGIME DETECTION ──────────────────────────────
+// Classifies market as BULL / BEAR / SIDEWAYS using:
+// SPY (US) and XIU.TO (TSX) — both must be checked
+let regimeCache = null;
+let regimeTs    = 0;
+
+async function detectMarketRegime(){
+  // Cache for 30 minutes
+  if(regimeCache && Date.now()-regimeTs < 1800000) return regimeCache;
+
+  async function analyseIndex(sym){
+    try{
+      const res = await fetchD(sym);
+      const q   = res.indicators.quote[0];
+      const cls = res.timestamp.map((_,i)=>q.close[i]).filter(Boolean);
+      const n   = cls.length-1;
+      if(n<200) return null;
+
+      const e20  = ema(cls,20)[n];
+      const e50  = ema(cls,50)[n];
+      const e200 = ema(cls,200)[n];
+      const rsiV = rsiCalc(cls,14)[n];
+      const px   = res.meta.regularMarketPrice || cls[n];
+
+      // 20-day slope (positive = rising)
+      const slope20 = ((cls[n]-cls[n-20])/cls[n-20]*100).toFixed(1);
+      // 5-day momentum
+      const mom5    = ((cls[n]-cls[n-5])/cls[n-5]*100).toFixed(2);
+
+      let bullPoints=0, bearPoints=0;
+      if(px>e200)     bullPoints++; else bearPoints++;
+      if(px>e50)      bullPoints++; else bearPoints++;
+      if(px>e20)      bullPoints++; else bearPoints++;
+      if(e20>e50)     bullPoints++; else bearPoints++;
+      if(e50>e200)    bullPoints++; else bearPoints++;
+      if(rsiV>50)     bullPoints++; else bearPoints++;
+      if(parseFloat(slope20)>0) bullPoints++; else bearPoints++;
+
+      let regime, strength;
+      if(bullPoints>=6)     { regime="BULL";     strength="STRONG"; }
+      else if(bullPoints>=5){ regime="BULL";     strength="MODERATE"; }
+      else if(bearPoints>=6){ regime="BEAR";     strength="STRONG"; }
+      else if(bearPoints>=5){ regime="BEAR";     strength="MODERATE"; }
+      else                  { regime="SIDEWAYS"; strength="NEUTRAL"; }
+
+      return{sym,regime,strength,bullPoints,bearPoints,px,e20,e50,e200,rsiV,slope20,mom5};
+    }catch{ return null; }
+  }
+
+  const [spy, tsx] = await Promise.all([analyseIndex("SPY"), analyseIndex("XIU.TO")]);
+
+  // Combined regime — both must agree for strong signal
+  let combined, label, cssClass, gateSignals;
+  if(!spy && !tsx){
+    combined="UNKNOWN"; label="Market data unavailable"; cssClass="regime-side"; gateSignals=false;
+  } else {
+    const spyR = spy?.regime  || "SIDEWAYS";
+    const tsxR = tsx?.regime  || "SIDEWAYS";
+    const both = [spyR, tsxR];
+
+    if(both.every(r=>r==="BULL")){
+      combined="BULL"; label="Both markets BULLISH — full signal mode"; cssClass="regime-bull"; gateSignals=false;
+    } else if(both.every(r=>r==="BEAR")){
+      combined="BEAR"; label="Both markets BEARISH — signals suppressed"; cssClass="regime-bear"; gateSignals=true;
+    } else if(both.includes("BEAR")){
+      combined="CAUTION"; label="Mixed regime — trade smaller, be selective"; cssClass="regime-side"; gateSignals=false;
+    } else {
+      combined="SIDEWAYS"; label="Sideways market — wait for clearer trend"; cssClass="regime-side"; gateSignals=false;
+    }
+  }
+
+  regimeCache = {combined, label, cssClass, gateSignals, spy, tsx};
+  regimeTs    = Date.now();
+  return regimeCache;
+}
+
+function renderRegimeBar(regime){
+  const bar = document.getElementById("REGIME_BAR");
+  if(!bar) return;
+  const col = regime.combined==="BULL"?"#00d084":regime.combined==="BEAR"?"#ff4757":"#f5a623";
+  const icon= regime.combined==="BULL"?"▲":regime.combined==="BEAR"?"▼":"◆";
+  let html = `<span style="color:${col};font-weight:700">${icon} ${regime.combined} MARKET</span>
+    <span style="color:var(--muted)">|</span>
+    <span style="color:var(--muted)">${regime.label}</span>`;
+  if(regime.spy){
+    html+=`<span style="color:var(--muted);margin-left:8px">SPY: <span style="color:${regime.spy.regime==="BULL"?"var(--green)":regime.spy.regime==="BEAR"?"var(--red)":"var(--amber)"}">${regime.spy.regime}</span></span>`;
+  }
+  if(regime.tsx){
+    html+=`<span style="color:var(--muted);margin-left:8px">TSX: <span style="color:${regime.tsx.regime==="BULL"?"var(--green)":regime.tsx.regime==="BEAR"?"var(--red)":"var(--amber)"}">${regime.tsx.regime}</span></span>`;
+  }
+  bar.innerHTML=html;
+}
+
+function renderRegimePanel(regime){
+  const el=document.getElementById("MREG");
+  if(!el) return;
+  const spy=regime.spy, tsx=regime.tsx;
+  const gateMsg=regime.gateSignals?'<div style="background:rgba(255,71,87,.1);border:1px solid rgba(255,71,87,.3);border-radius:5px;padding:7px 9px;margin-top:8px;font-size:10px;color:var(--red);">⚠️ BEAR MARKET DETECTED<br>Long signals suppressed. Wait for regime shift before trading.</div>':'';
+  const col=regime.combined==="BULL"?"var(--green)":regime.combined==="BEAR"?"var(--red)":"var(--amber)";
+
+  let html=`<div style="margin-bottom:8px"><span class="${regime.cssClass}">${regime.combined}</span></div>`;
+  html+=`<div class="row"><span class="lbl">US (SPY)</span><span class="val ${spy?.regime==="BULL"?"up":spy?.regime==="BEAR"?"dn":"wn"}">${spy?.regime||"N/A"} ${spy?.strength||""}</span></div>`;
+  html+=`<div class="row"><span class="lbl">TSX (XIU)</span><span class="val ${tsx?.regime==="BULL"?"up":tsx?.regime==="BEAR"?"dn":"wn"}">${tsx?.regime||"N/A"} ${tsx?.strength||""}</span></div>`;
+  if(spy){
+    html+=`<div style="border-top:1px solid var(--border);margin-top:6px;padding-top:6px">`;
+    html+=`<div style="font-size:9px;color:var(--muted);margin-bottom:4px;letter-spacing:1px">S&P 500 DETAIL</div>`;
+    html+=`<div class="row"><span class="lbl">vs EMA 200</span><span class="val ${spy.px>spy.e200?"up":"dn"}">${spy.px>spy.e200?"ABOVE":"BELOW"}</span></div>`;
+    html+=`<div class="row"><span class="lbl">vs EMA 50</span><span class="val ${spy.px>spy.e50?"up":"dn"}">${spy.px>spy.e50?"ABOVE":"BELOW"}</span></div>`;
+    html+=`<div class="row"><span class="lbl">RSI</span><span class="val ${spy.rsiV>50?"up":"dn"}">${spy.rsiV?.toFixed(1)}</span></div>`;
+    html+=`<div class="row"><span class="lbl">20d slope</span><span class="val ${parseFloat(spy.slope20)>0?"up":"dn"}">${spy.slope20>0?"+":""}${spy.slope20}%</span></div>`;
+    html+=`<div class="row"><span class="lbl">Bull/Bear pts</span><span class="val">${spy.bullPoints}B / ${spy.bearPoints}Be</span></div>`;
+    html+=`</div>`;
+  }
+  html+=gateMsg;
+  el.innerHTML=html;
+}
+
+// ── POSITION SIZING ───────────────────────────────────────
+function calcPositionSize(){
+  const acct  = parseFloat(document.getElementById("PS_ACCT")?.value) || 0;
+  const riskP = parseFloat(document.getElementById("PS_RISK")?.value) || 1;
+  const out   = document.getElementById("PS_OUT");
+  if(!out) return;
+  if(!acct || acct<=0){ out.innerHTML=""; return; }
+  if(!LAST_SIG){ out.innerHTML=`<div class="ps-result" style="color:var(--muted)">Select a ticker with a valid signal first</div>`; return; }
+
+  const riskDollars = acct * (riskP/100);
+  const riskPerShare= LAST_SIG.entry - LAST_SIG.stop;
+  if(riskPerShare<=0){ out.innerHTML=`<div class="ps-result" style="color:var(--red)">Invalid stop level</div>`; return; }
+
+  const shares      = Math.floor(riskDollars / riskPerShare);
+  const posValue    = shares * LAST_SIG.entry;
+  const posPercent  = (posValue/acct*100).toFixed(1);
+  const maxLoss     = shares * riskPerShare;
+  const maxGain1    = shares * (LAST_SIG.tp1 - LAST_SIG.entry);
+  const maxGain2    = shares * (LAST_SIG.tp2 - LAST_SIG.entry);
+  const cur         = TICKER?.endsWith(".TO")?"CAD":"USD";
+  const cs          = cur==="CAD"?"CA$":"$";
+
+  // Warning if position too large
+  const sizeWarn = parseFloat(posPercent)>10 ?
+    `<div style="color:var(--red);font-size:9px;margin-top:4px">⚠️ Position is ${posPercent}% of account — consider reducing</div>` : "";
+  const regWarn  = regimeCache?.gateSignals ?
+    `<div style="color:var(--red);font-size:9px;margin-top:4px">⚠️ Bear market active — consider halving position size</div>` : "";
+  const adjShares= regimeCache?.combined==="CAUTION" ? Math.floor(shares*.75) : shares;
+  const adjNote  = regimeCache?.combined==="CAUTION" ?
+    `<div style="color:var(--amber);font-size:9px;margin-top:2px">Adjusted to 75% size (caution regime)</div>` : "";
+
+  out.innerHTML=`<div class="ps-result">
+    <div class="row"><span class="lbl">Shares to buy</span><span class="val up" style="font-size:14px">${adjShares}</span></div>
+    ${adjNote}
+    <div style="border-top:1px solid var(--border);margin:6px 0;"></div>
+    <div class="row"><span class="lbl">Entry price</span><span class="val">${cs}${LAST_SIG.entry}</span></div>
+    <div class="row"><span class="lbl">Position value</span><span class="val">${cs}${posValue.toLocaleString(undefined,{maximumFractionDigits:0})}</span></div>
+    <div class="row"><span class="lbl">% of account</span><span class="val ${parseFloat(posPercent)>10?"dn":"wn"}">${posPercent}%</span></div>
+    <div style="border-top:1px solid var(--border);margin:6px 0;"></div>
+    <div class="row"><span class="lbl">Max loss (stop)</span><span class="val dn">-${cs}${maxLoss.toFixed(0)}</span></div>
+    <div class="row"><span class="lbl">Max gain (TP1)</span><span class="val up">+${cs}${maxGain1.toFixed(0)}</span></div>
+    <div class="row"><span class="lbl">Max gain (TP2)</span><span class="val up">+${cs}${maxGain2.toFixed(0)}</span></div>
+    <div style="border-top:1px solid var(--border);margin:6px 0;"></div>
+    <div class="row"><span class="lbl">Risk amount</span><span class="val">${cs}${maxLoss.toFixed(0)} (${riskP}%)</span></div>
+    <div class="row"><span class="lbl">Stop distance</span><span class="val">${cs}${riskPerShare.toFixed(2)} / share</span></div>
+    ${sizeWarn}${regWarn}
+  </div>`;
+
+  // Save account size for persistence
+  localStorage.setItem("ps_acct", acct);
+  localStorage.setItem("ps_risk", riskP);
+}
+
 // ── PATTERN MATCHING ──────────────────────────────────────
 function findSimilarSetups(candles,e9a,e21a,e50a,rsi14,atrArr){
   const results=[];
@@ -504,6 +705,9 @@ async function go(sym){
     const candles=ts.map((t,i)=>({t,o:q.open[i]?+q.open[i].toFixed(2):null,h:q.high[i]?+q.high[i].toFixed(2):null,l:q.low[i]?+q.low[i].toFixed(2):null,c:q.close[i]?+q.close[i].toFixed(2):null,v:q.volume[i]||0})).filter(c=>c.o&&c.h&&c.l&&c.c);
     if(!candles.length)throw new Error("No price data");
 
+    // Refresh regime silently in background
+    detectMarketRegime().then(r=>{renderRegimeBar(r);renderRegimePanel(r);});
+
     const closes=candles.map(c=>c.c);
     const e9a=ema(closes,9),e21a=ema(closes,21),e50a=ema(closes,50),rsi14=rsiCalc(closes,14);
     const e200a=calcEMA200(closes);
@@ -530,18 +734,28 @@ async function go(sym){
     document.getElementById("PT").innerHTML=`<div class="row"><span class="lbl">RSI (14)</span><span class="val ${rsiV<30?"up":rsiV>70?"dn":""}">${rsiV}</span></div><div class="row"><span class="lbl">EMA 9</span><span class="val">${e9v}</span></div><div class="row"><span class="lbl">EMA 21</span><span class="val">${e21v}</span></div><div class="row"><span class="lbl">EMA 50</span><span class="val">${e50v}</span></div><div class="row"><span class="lbl">EMA Align</span><span class="val ${ac}">${al}</span></div><div class="row"><span class="lbl">vs EMA 50</span><span class="val ${price>e50v?"up":"dn"}">${price>e50v?"ABOVE":"BELOW"}</span></div><div class="row"><span class="lbl">Vol vs Avg</span><span class="val ${volR>=100?"up":"wn"}">${volR}%</span></div>`;
 
     const sig=estSig(price,e9v,e21v,e50v,rsiV,candles,e200v,atrVal);
-    if(!sig){
+    // Regime gate — warn if bear market
+    const regime = regimeCache;
+    const regimeWarning = regime?.gateSignals
+      ? `<div style="background:rgba(255,71,87,.1);border:1px solid rgba(255,71,87,.3);border-radius:5px;padding:7px 9px;margin-bottom:8px;font-size:10px;color:var(--red);">
+           ⚠️ BEAR MARKET — signals suppressed<br>
+           <span style="color:var(--muted)">Both SPY and TSX are in confirmed downtrends. Wait for regime shift before taking long trades.</span>
+         </div>` : "";
+
+    if(!sig || regime?.gateSignals){
       const e9v2=e9a[n],e21v2=e21a[n],e50v2=e50a[n],rsiV2=rsi14[n];
       const s1=e9v2>e21v2&&e21v2>e50v2,s2=price>e50v2,s3=rsiV2>45&&rsiV2<70,s4=candles[n].c>candles[n].o;
       const passed=[s1,s2,s3,s4].filter(Boolean).length;
       const tick=(v)=>v?'<span style="color:#00d084">&#10003;</span>':'<span style="color:#ff4757">&#10007;</span>';
-      document.getElementById("PG").innerHTML=`
+      document.getElementById("PG").innerHTML=regimeWarning+`
         <div style="color:var(--muted);font-size:10px;margin-bottom:8px">No qualifying LONG signal &mdash; ${passed}/4 criteria met</div>
         <div style="background:#0d1219;border-radius:6px;padding:8px;font-size:10px;line-height:1.9;">
-          ${tick(s1)} EMA 9 &gt; 21 &gt; 50 (bullish alignment)<br>
+          ${tick(s1)} EMA alignment (9&gt;21&gt;50)<br>
           ${tick(s2)} Price above EMA 50<br>
-          ${tick(s3)} RSI 45&ndash;70 (momentum zone)<br>
-          ${tick(s4)} Last candle bullish
+          ${tick(s3)} RSI 45&ndash;70 momentum zone<br>
+          ${tick(s4)} Bullish last candle<br>
+          ${tick(e200v?price>e200v:false)} Price above EMA 200<br>
+          ${tick(!regime?.gateSignals)} Market regime (not bear)
         </div>`;
     }
     else{
@@ -621,6 +835,8 @@ async function go(sym){
     }
 
     document.getElementById("AB").disabled=false;document.getElementById("AB").textContent="&#9889; RUN CLAUDE ANALYSIS";
+    // Auto-calculate position size if account already set
+    setTimeout(calcPositionSize, 100);
 
   }catch(err){
     document.getElementById("TB").innerHTML=`<span style="color:var(--red);font-size:12px">&#10007; ${sym}: ${err.message}</span>`;
@@ -641,6 +857,13 @@ async function scanAll(){
   document.querySelectorAll(".dot").forEach(d=>d.className="dot");
   // Add gold ring to signal qualifying tickers
   const qualified=[];
+
+  // Check regime before scanning — warn in bear market
+  const scanRegime = await detectMarketRegime();
+  if(scanRegime.gateSignals){
+    const proceed=confirm("⚠️ BEAR MARKET DETECTED\n\nBoth SPY and TSX are in confirmed downtrends.\nLong signals are suppressed in bear markets.\n\nDo you still want to scan? (Not recommended)");
+    if(!proceed){scanRunning=false;btn.textContent="&#9654; SCAN ALL";btn.disabled=false;return;}
+  }
 
   const allTickers=Object.values(WL).flat();
   for(const sym of allTickers){
@@ -855,7 +1078,26 @@ window.onload=function(){
   buildSB();
   layout();
   if(!localStorage.getItem("apiKey"))setTimeout(openM,1500);
-  setTimeout(()=>go("NVDA"),200);
+
+  // Restore saved account settings
+  const savedAcct=localStorage.getItem("ps_acct");
+  const savedRisk=localStorage.getItem("ps_risk");
+  if(savedAcct)document.getElementById("PS_ACCT").value=savedAcct;
+  if(savedRisk)document.getElementById("PS_RISK").value=savedRisk;
+
+  // Load regime first, then ticker
+  const bar=document.getElementById("REGIME_BAR");
+  if(bar)bar.innerHTML='<span style="color:var(--muted);font-size:10px">&#9679; Detecting market regime...</span>';
+  const mreg=document.getElementById("MREG");
+  if(mreg)mreg.innerHTML='<span class="lbl">Detecting regime...</span>';
+
+  detectMarketRegime().then(regime=>{
+    renderRegimeBar(regime);
+    renderRegimePanel(regime);
+    setTimeout(()=>go("NVDA"),200);
+  }).catch(()=>{
+    setTimeout(()=>go("NVDA"),200);
+  });
 };
 </script>
 </body>
