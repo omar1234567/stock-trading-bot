@@ -91,6 +91,7 @@ canvas{display:block;}
       <span class="leg" style="color:#f5a623">&#9646; EMA9</span>
       <span class="leg" style="color:#4fc3f7">&#9646; EMA21</span>
       <span class="leg" style="color:#9c88ff">&#9646; EMA50</span>
+      <span class="leg" style="color:#ff6b6b">&#9646; EMA200</span>
       <span class="leg" style="color:#4fc3f7cc">&#9135;&#9135; ENTRY</span>
       <span class="leg" style="color:#ff4757cc">&#9135;&#9135; STOP</span>
       <span class="leg" style="color:#00d084cc">&#9135;&#9135; TP</span>
@@ -106,6 +107,7 @@ canvas{display:block;}
   <div class="rps"><div class="rpt">Shariah Status</div><div id="PS"><span class="lbl">Select a ticker</span></div></div>
   <div class="rps"><div class="rpt">Trade Signal</div><div id="PG"><span class="lbl">Select a ticker</span></div></div>
   <div class="rps"><div class="rpt">Technicals</div><div id="PT"><span class="lbl">Select a ticker</span></div></div>
+  <div class="rps"><div class="rpt">&#9671; Performance Intel</div><div id="PERF"><span class="lbl">Select a ticker</span></div></div>
   <div class="rps">
     <div class="rpt">Claude Analysis</div>
     <button class="abtn" id="AB" disabled onclick="runC()">SELECT A TICKER FIRST</button>
@@ -190,7 +192,7 @@ async function fetchD(sym){
 }
 
 // ── CANVAS DRAWING ────────────────────────────────────────
-function drawCandleChart(ctx,candles,e9a,e21a,e50a,sig,W,H){
+function drawCandleChart(ctx,candles,e9a,e21a,e50a,sig,W,H,e200a){
   ctx.clearRect(0,0,W,H);
   const LPAD=55,RPAD=12,TPAD=15,BPAD=25;
   const cw=W-LPAD-RPAD,ch=H-TPAD-BPAD;
@@ -264,6 +266,18 @@ function drawCandleChart(ctx,candles,e9a,e21a,e50a,sig,W,H){
     if(sig.tp2)drawHLine(sig.tp2,"#00d08466","TP2");
   }
 
+  // EMA 200
+  if(e200a){
+    ctx.strokeStyle="#ff6b6b";ctx.lineWidth=1;ctx.beginPath();
+    let fe=true;
+    e200a.forEach((v,i)=>{
+      if(v==null||i>=N)return;
+      const x=xOf(i),y=yOf(v);
+      if(fe){ctx.moveTo(x,y);fe=false;}else ctx.lineTo(x,y);
+    });
+    ctx.stroke();
+  }
+
   // X axis dates — show ~6 labels
   ctx.fillStyle="#5a6a7a";ctx.font="9px Space Mono,monospace";ctx.textAlign="center";
   const step=Math.floor(N/6);
@@ -324,47 +338,147 @@ function drawAll(data,sig){
   const {cw,ch}=layout();
   const cv=document.getElementById("CV"),rv=document.getElementById("RV");
   const ctx1=cv.getContext("2d"),ctx2=rv.getContext("2d");
-  drawCandleChart(ctx1,data.candles,data.e9a,data.e21a,data.e50a,sig,cw,ch);
+  drawCandleChart(ctx1,data.candles,data.e9a,data.e21a,data.e50a,sig,cw,ch,data.e200a);
   drawRSIChart(ctx2,data.candles,data.rsi14,cw,RSI_H);
 }
 
 // ── SIGNAL ESTIMATE ───────────────────────────────────────
 // ── SIGNAL CONFIG ─────────────────────────────────────────
-const MIN_BULL_SCORE = 4;   // Require ALL 4 indicators bullish
-const MIN_PROB       = 70;  // Minimum probability %
-const LONG_ONLY      = true; // Never show short signals
+// ── SIGNAL CONFIG ──────────────────────────────────────────
+const MIN_BULL_SCORE = 4;
+const MIN_PROB       = 70;
 
-function estSig(price,e9v,e21v,e50v,rsiV,candles){
+// ── ATR ──────────────────────────────────────────────────
+function calcATR(candles,n=14){
+  const tr=candles.map((c,i)=>{
+    if(!i)return c.h-c.l;
+    const prev=candles[i-1];
+    return Math.max(c.h-c.l,Math.abs(c.h-prev.c),Math.abs(c.l-prev.c));
+  });
+  let atr=tr.slice(0,n).reduce((a,b)=>a+b,0)/n;
+  const out=new Array(n).fill(null);
+  for(let i=n;i<tr.length;i++){atr=(atr*(n-1)+tr[i])/n;out.push(+atr.toFixed(4));}
+  return out;
+}
+
+// ── EMA 200 ───────────────────────────────────────────────
+function calcEMA200(closes){return ema(closes,200);}
+
+// ── SUPPORT PROXIMITY ─────────────────────────────────────
+function nearestSupport(candles,price){
+  const lows=candles.slice(-60).map(c=>c.l).sort((a,b)=>a-b);
+  const s1=lows[Math.floor(lows.length*.1)];
+  const s2=lows[Math.floor(lows.length*.2)];
+  const nearest=Math.max(s1||0,s2||0);
+  const distPct=+((price-nearest)/price*100).toFixed(1);
+  return{level:+nearest.toFixed(2),distPct};
+}
+
+// ── SECTOR MOMENTUM ───────────────────────────────────────
+const SECTOR_MAP={
+  NVDA:"XLK",AAPL:"XLK",MSFT:"XLK",AVGO:"XLK",AMD:"XLK",MU:"XLK",LRCX:"XLK",AMAT:"XLK",TXN:"XLK",KLAC:"XLK",GOOGL:"XLK",ORCL:"XLK",ADBE:"XLK",CRM:"XLK",NOW:"XLK",PANW:"XLK",CRWD:"XLK",ANET:"XLK",
+  LLY:"XLV",JNJ:"XLV",ABBV:"XLV",MRK:"XLV",ABT:"XLV",TMO:"XLV",AMGN:"XLV",GILD:"XLV",REGN:"XLV",VRTX:"XLV",BSX:"XLV",SYK:"XLV",ISRG:"XLV",DHR:"XLV",
+  XOM:"XLE",CVX:"XLE",COP:"XLE",EOG:"XLE",
+  TSLA:"XLY",HD:"XLY",COST:"XLY",LOW:"XLY",NKE:"XLY",
+  PG:"XLP",PEP:"XLP",CAT:"XLI",DE:"XLI",HON:"XLI",GEV:"XLI",ODFL:"XLI",LIN:"XLB"
+};
+const sectorCache={};
+async function getSectorMomentum(ticker){
+  const etf=SECTOR_MAP[ticker.replace(".TO","")]||null;
+  if(!etf)return{score:0,label:"N/A",etf:null,trend:"UNKNOWN"};
+  if(sectorCache[etf])return sectorCache[etf];
+  try{
+    const res=await fetchD(etf);
+    const q=res.indicators.quote[0];
+    const closes=res.timestamp.map((_,i)=>q.close[i]).filter(Boolean);
+    const n=closes.length-1;
+    const e9v=ema(closes,9)[n],e21v=ema(closes,21)[n],e50v=ema(closes,50)[n];
+    const price=res.meta.regularMarketPrice||closes[n];
+    const prev20=closes[n-20]||closes[0];
+    const ret20=+((price/prev20-1)*100).toFixed(1);
+    let score=0;
+    if(e9v>e21v)score++;if(e21v>e50v)score++;if(price>e50v)score++;if(ret20>0)score++;
+    const label=score>=3?"BULLISH":score===2?"NEUTRAL":"BEARISH";
+    const result={score,label,etf,ret20};
+    sectorCache[etf]=result;
+    return result;
+  }catch{return{score:0,label:"N/A",etf,ret20:0};}
+}
+
+// ── PATTERN MATCHING ──────────────────────────────────────
+function findSimilarSetups(candles,e9a,e21a,e50a,rsi14,atrArr){
+  const results=[];
+  const n=candles.length;
+  for(let i=60;i<n-15;i++){
+    const p=candles[i].c,e9=e9a[i],e21=e21a[i],e50=e50a[i],r=rsi14[i];
+    if(!e9||!e21||!e50||!r)continue;
+    if(!(e9>e21&&e21>e50&&p>e50&&r>45&&r<70&&candles[i].c>candles[i].o))continue;
+    const atr=atrArr[i]||Math.abs(candles[i].h-candles[i].l);
+    const stop=p-atr*1.5,tp1=p+atr*3;
+    let outcome=null;
+    for(let j=i+1;j<=Math.min(i+15,n-1);j++){
+      if(candles[j].h>=tp1){outcome="WIN";break;}
+      if(candles[j].l<=stop){outcome="LOSS";break;}
+    }
+    results.push({date:new Date(candles[i].t*1000),price:p,outcome:outcome||"OPEN"});
+  }
+  return results;
+}
+
+function patternStats(matches){
+  const closed=matches.filter(m=>m.outcome!=="OPEN");
+  if(!closed.length)return{winRate:0,total:0,wins:0,losses:0,recentWins:0,recentTotal:0};
+  const wins=closed.filter(m=>m.outcome==="WIN").length;
+  const recent=matches.slice(-5).filter(m=>m.outcome!=="OPEN");
+  return{winRate:Math.round(wins/closed.length*100),total:closed.length,wins,losses:closed.length-wins,recentWins:recent.filter(m=>m.outcome==="WIN").length,recentTotal:recent.length};
+}
+
+// ── BEST ENTRY TIMING ─────────────────────────────────────
+function bestEntryTiming(candles){
+  const dayR={0:[],1:[],2:[],3:[],4:[]};
+  const perR={early:[],mid:[],late:[]};
+  for(let i=1;i<candles.length-5;i++){
+    const d=new Date(candles[i].t*1000),day=d.getDay(),dom=d.getDate();
+    const fwd=(candles[i+5].c-candles[i].c)/candles[i].c*100;
+    if(day>=1&&day<=5&&dayR[day-1])dayR[day-1].push(fwd);
+    if(dom<=10)perR.early.push(fwd);else if(dom<=20)perR.mid.push(fwd);else perR.late.push(fwd);
+  }
+  const avg=arr=>arr.length?+(arr.reduce((a,b)=>a+b,0)/arr.length).toFixed(2):0;
+  const days=["Mon","Tue","Wed","Thu","Fri"].map((day,i)=>({day,avg:avg(dayR[i])})).sort((a,b)=>b.avg-a.avg);
+  const periods=["early","mid","late"].map(p=>({period:p,avg:avg(perR[p])})).sort((a,b)=>b.avg-a.avg);
+  return{bestDay:days[0],worstDay:days[days.length-1],bestPeriod:periods[0],allDays:days};
+}
+
+// ── MAIN SIGNAL FUNCTION ──────────────────────────────────
+function estSig(price,e9v,e21v,e50v,rsiV,candles,e200v,atrVal){
   let b=0;
-  // All 4 must pass for a valid LONG signal
-  const sig1 = e9v>e21v&&e21v>e50v;          // EMA alignment bullish
-  const sig2 = price>e50v;                    // Price above EMA50
-  const sig3 = rsiV>45&&rsiV<70;             // RSI bullish momentum (not overbought)
-  const lc   = candles[candles.length-1];
-  const sig4 = lc.c>lc.o;                    // Last candle bullish
-
+  const sig1=e9v>e21v&&e21v>e50v;
+  const sig2=price>e50v;
+  const sig3=rsiV>45&&rsiV<70;
+  const lc=candles[candles.length-1];
+  const sig4=lc.c>lc.o;
   if(sig1)b++;if(sig2)b++;if(sig3)b++;if(sig4)b++;
-
-  // Must meet minimum score threshold — no shorts
   if(b<MIN_BULL_SCORE)return null;
-
-  const prob=Math.min(60+b*8,88);
-  if(prob<MIN_PROB)return null;
-
-  const lows=candles.slice(-30).map(c=>c.l).sort((a,b2)=>a-b2);
-  const sup=lows[Math.floor(lows.length*.15)];
-  const stop=+(sup*.99).toFixed(2);
+  // Must be above 200 EMA
+  if(e200v&&price<e200v)return null;
+  // Must be within 8% of support
+  const {level:supLevel,distPct}=nearestSupport(candles,price);
+  if(distPct>8)return null;
+  // ATR-based stop
+  const atr=atrVal||Math.abs(lc.h-lc.l);
+  const stop=+(price-atr*1.5).toFixed(2);
   const r=price-stop;
   if(r<=0)return null;
   const tp1=+(price+r*2).toFixed(2);
   const tp2=+(price+r*3).toFixed(2);
-  const rr=+Math.abs((tp1-price)/(price-stop)).toFixed(1);
-  if(rr<2)return null; // Enforce 1:2 minimum R:R
-
-  return{dir:"LONG",entry:+price.toFixed(2),stop,tp1,tp2,rr,prob,score:b,
-         signals:{emaAlign:sig1,aboveEma50:sig2,rsiMomentum:sig3,bullCandle:sig4}};
+  const rr=+Math.abs((tp1-price)/r).toFixed(1);
+  if(rr<2)return null;
+  const prob=Math.min(60+b*8,88);
+  if(prob<MIN_PROB)return null;
+  return{dir:"LONG",entry:+price.toFixed(2),stop,tp1,tp2,rr,prob,score:b,atr:+atr.toFixed(2),
+    support:{level:supLevel,distPct},
+    signals:{emaAlign:sig1,aboveEma50:sig2,rsiMomentum:sig3,bullCandle:sig4,above200:e200v?price>e200v:true,nearSupport:distPct<=8}};
 }
-
 // ── MAIN GO ───────────────────────────────────────────────
 async function go(sym){
   if(!sym)return;sym=sym.toUpperCase().trim();TICKER=sym;
@@ -392,11 +506,15 @@ async function go(sym){
 
     const closes=candles.map(c=>c.c);
     const e9a=ema(closes,9),e21a=ema(closes,21),e50a=ema(closes,50),rsi14=rsiCalc(closes,14);
+    const e200a=calcEMA200(closes);
+    const atrArr=calcATR(candles,14);
     const n=candles.length-1,price=meta.regularMarketPrice||closes[n];
     const prev=meta.chartPreviousClose||closes[n-1]||closes[n];
     const chg=price-prev,chgP=chg/prev*100;
     const cur=sym.endsWith(".TO")?"CAD":"USD",cs=cur==="CAD"?"CA$":"$";
     const avgV=meta.averageDailyVolume10Day||0,volR=avgV>0?Math.round(candles[n].v/avgV*100):0;
+    const e200v=e200a[n];
+    const atrVal=atrArr[n];
 
     const col=chg>=0?"var(--green)":"var(--red)",sign=chg>=0?"+":"";
     document.getElementById("TB").innerHTML=`<div><div class="tsym">${sym}</div><div class="tname">${meta.shortName||sym} &middot; ${cur}</div></div><div><div class="tpx" style="color:${col}">${cs}${price.toFixed(2)}</div><div class="tchg" style="color:${col}">${sign}${chg.toFixed(2)} (${sign}${chgP.toFixed(2)}%)</div></div><div class="trng">52W: ${cs}${meta.fiftyTwoWeekLow?.toFixed(2)} &ndash; ${cs}${meta.fiftyTwoWeekHigh?.toFixed(2)}</div>`;
@@ -411,7 +529,7 @@ async function go(sym){
     const ac=al==="BULLISH"?"up":al==="BEARISH"?"dn":"wn";
     document.getElementById("PT").innerHTML=`<div class="row"><span class="lbl">RSI (14)</span><span class="val ${rsiV<30?"up":rsiV>70?"dn":""}">${rsiV}</span></div><div class="row"><span class="lbl">EMA 9</span><span class="val">${e9v}</span></div><div class="row"><span class="lbl">EMA 21</span><span class="val">${e21v}</span></div><div class="row"><span class="lbl">EMA 50</span><span class="val">${e50v}</span></div><div class="row"><span class="lbl">EMA Align</span><span class="val ${ac}">${al}</span></div><div class="row"><span class="lbl">vs EMA 50</span><span class="val ${price>e50v?"up":"dn"}">${price>e50v?"ABOVE":"BELOW"}</span></div><div class="row"><span class="lbl">Vol vs Avg</span><span class="val ${volR>=100?"up":"wn"}">${volR}%</span></div>`;
 
-    const sig=estSig(price,e9v,e21v,e50v,rsiV,candles);
+    const sig=estSig(price,e9v,e21v,e50v,rsiV,candles,e200v,atrVal);
     if(!sig){
       const e9v2=e9a[n],e21v2=e21a[n],e50v2=e50a[n],rsiV2=rsi14[n];
       const s1=e9v2>e21v2&&e21v2>e50v2,s2=price>e50v2,s3=rsiV2>45&&rsiV2<70,s4=candles[n].c>candles[n].o;
@@ -447,8 +565,61 @@ async function go(sym){
         <div class="note" style="margin-top:5px">All 4 signals confirmed &mdash; run Claude for full analysis</div>`;
     }
 
-    LAST_DATA={candles,e9a,e21a,e50a,rsi14};LAST_SIG=sig;
+    LAST_DATA={candles,e9a,e21a,e50a,rsi14,e200a,atrArr};LAST_SIG=sig;
     drawAll(LAST_DATA,LAST_SIG);
+
+    // ── Performance Intelligence ─────────────────────────
+    const perfSection=document.getElementById("PERF");
+    if(perfSection){
+      perfSection.innerHTML='<span class="lbl">Calculating...</span>';
+
+      // 1. Sector momentum (async)
+      getSectorMomentum(sym).then(sec=>{
+        const secCol=sec.label==="BULLISH"?"var(--green)":sec.label==="BEARISH"?"var(--red)":"var(--amber)";
+        let html=`<div style="margin-bottom:8px">
+          <div class="row"><span class="lbl">Sector ETF</span><span class="val">${sec.etf||"N/A"}</span></div>
+          <div class="row"><span class="lbl">Sector Trend</span><span class="val" style="color:${secCol}">${sec.label}</span></div>
+          <div class="row"><span class="lbl">Sector Score</span><span class="val wn">${sec.score}/4</span></div>
+          ${sec.ret20!==undefined?`<div class="row"><span class="lbl">20d Return</span><span class="val ${sec.ret20>=0?"up":"dn"}">${sec.ret20>=0?"+":""}${sec.ret20}%</span></div>`:""}
+        </div>`;
+
+        // 2. Pattern matching
+        const matches=findSimilarSetups(candles,e9a,e21a,e50a,rsi14,atrArr);
+        const stats=patternStats(matches);
+        const wrCol=stats.winRate>=65?"var(--green)":stats.winRate>=50?"var(--amber)":"var(--red)";
+        html+=`<div style="border-top:1px solid var(--border);padding-top:8px;margin-top:4px">
+          <div style="font-size:9px;font-weight:700;letter-spacing:1.5px;color:var(--muted);margin-bottom:6px">SIMILAR PAST SETUPS</div>
+          <div class="row"><span class="lbl">Setups found</span><span class="val">${stats.total}</span></div>
+          <div class="row"><span class="lbl">Win rate</span><span class="val" style="color:${wrCol}">${stats.winRate}%</span></div>
+          <div class="row"><span class="lbl">W / L</span><span class="val">${stats.wins} / ${stats.losses}</span></div>
+          <div class="row"><span class="lbl">Recent 5 signal</span><span class="val ${stats.recentWins/stats.recentTotal>=.6?"up":"dn"}">${stats.recentWins}/${stats.recentTotal} won</span></div>
+        </div>`;
+
+        // 3. Best entry timing
+        const timing=bestEntryTiming(candles);
+        html+=`<div style="border-top:1px solid var(--border);padding-top:8px;margin-top:4px">
+          <div style="font-size:9px;font-weight:700;letter-spacing:1.5px;color:var(--muted);margin-bottom:6px">BEST ENTRY TIMING</div>
+          <div class="row"><span class="lbl">Best day</span><span class="val up">${timing.bestDay?.day} (+${timing.bestDay?.avg}% avg 5d)</span></div>
+          <div class="row"><span class="lbl">Worst day</span><span class="val dn">${timing.worstDay?.day} (${timing.worstDay?.avg}% avg 5d)</span></div>
+          <div class="row"><span class="lbl">Best month period</span><span class="val up">${timing.bestPeriod?.period} of month (+${timing.bestPeriod?.avg}%)</span></div>
+          <div style="margin-top:6px;font-size:9px;color:var(--muted)">Day rankings: ${timing.allDays.map(d=>`${d.day}:${d.avg>=0?"+":""}${d.avg}%`).join(" | ")}</div>
+        </div>`;
+
+        // 4. ATR info
+        if(sig&&atrVal){
+          html+=`<div style="border-top:1px solid var(--border);padding-top:8px;margin-top:4px">
+            <div style="font-size:9px;font-weight:700;letter-spacing:1.5px;color:var(--muted);margin-bottom:6px">ATR-BASED SIZING</div>
+            <div class="row"><span class="lbl">ATR (14d)</span><span class="val wn">$${atrVal.toFixed(2)}</span></div>
+            <div class="row"><span class="lbl">Stop (1.5x ATR)</span><span class="val dn">$${sig.stop}</span></div>
+            <div class="row"><span class="lbl">Risk per share</span><span class="val">$${(sig.entry-sig.stop).toFixed(2)}</span></div>
+            <div class="row"><span class="lbl">Support dist</span><span class="val ${sig.support?.distPct<=4?"up":"wn"}">${sig.support?.distPct}% above $${sig.support?.level}</span></div>
+          </div>`;
+        }
+
+        perfSection.innerHTML=html;
+      });
+    }
+
     document.getElementById("AB").disabled=false;document.getElementById("AB").textContent="&#9889; RUN CLAUDE ANALYSIS";
 
   }catch(err){
@@ -476,13 +647,14 @@ async function scanAll(){
     try{
       const res=await fetchD(sym);
       const meta=res.meta,ts=res.timestamp,q=res.indicators.quote[0];
-      const candles=ts.map((t,i)=>({t,o:q.open[i]?+q.open[i].toFixed(2):null,h:q.high[i]?+q.high[i].toFixed(2):null,l:q.low[i]?+q.low[i].toFixed(2):null,c:q.close[i]?+q.close[i].toFixed(2):null})).filter(c=>c.o&&c.h&&c.l&&c.c);
-      if(candles.length<60)continue;
-      const closes=candles.map(c=>c.c);
-      const n=candles.length-1;
-      const e9v=ema(closes,9)[n],e21v=ema(closes,21)[n],e50v=ema(closes,50)[n],rsiV=rsiCalc(closes,14)[n];
-      const price=meta.regularMarketPrice||closes[n];
-      const sig=estSig(price,e9v,e21v,e50v,rsiV,candles);
+      const sc=ts.map((t,i)=>({t,o:q.open[i]?+q.open[i].toFixed(2):null,h:q.high[i]?+q.high[i].toFixed(2):null,l:q.low[i]?+q.low[i].toFixed(2):null,c:q.close[i]?+q.close[i].toFixed(2):null})).filter(c=>c.o&&c.h&&c.l&&c.c);
+      if(sc.length<60)continue;
+      const closes=sc.map(c=>c.c);
+      const sn=sc.length-1;
+      const e9v=ema(closes,9)[sn],e21v=ema(closes,21)[sn],e50v=ema(closes,50)[sn],rsiV=rsiCalc(closes,14)[sn];
+      const e200av=calcEMA200(closes);const atrAv=calcATR(sc,14);
+      const price=meta.regularMarketPrice||closes[sn];
+      const sig=estSig(price,e9v,e21v,e50v,rsiV,sc,e200av[sn],atrAv[sn]);
       const dot=document.getElementById("dt_"+sym);
       if(sig){
         qualified.push({sym,sig,price});
