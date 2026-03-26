@@ -634,6 +634,8 @@ let ema21Series     = null;
 let ema50Series     = null;
 let rsiChart        = null;
 let rsiSeries       = null;
+let rsiRef30        = null;
+let rsiRef70        = null;
 let signalLines     = [];
 let currentSignal   = null;
 let shariahCache    = {};
@@ -647,9 +649,10 @@ document.addEventListener('DOMContentLoaded', () => {
   setTimeout(() => {
     initCharts();
     const saved = localStorage.getItem('apiKey');
-    if (!saved) setTimeout(showApiModal, 1200);
-    loadTicker('NVDA');
-  }, 150);
+    if (!saved) setTimeout(showApiModal, 1500);
+    // Extra delay for charts to fully init before loading data
+    setTimeout(() => loadTicker('NVDA'), 300);
+  }, 400);
 });
  
 // ============================================================
@@ -695,7 +698,15 @@ function initCharts() {
   const candleEl = document.getElementById('candle-chart');
   const rsiEl    = document.getElementById('rsi-chart');
  
+  // Ensure containers have explicit dimensions before creating charts
+  const cw = candleEl.clientWidth  || window.innerWidth - 430;
+  const ch = candleEl.clientHeight || 400;
+  const rw = rsiEl.clientWidth     || window.innerWidth - 430;
+  const rh = rsiEl.clientHeight    || 120;
+ 
   candleChart = LightweightCharts.createChart(candleEl, {
+    width:  cw,
+    height: ch,
     layout: {
       background:  { color: '#080c10' },
       textColor:   '#5a6a7a',
@@ -736,6 +747,8 @@ function initCharts() {
   ema50Series = candleChart.addLineSeries({ color: '#9c88ff', lineWidth: 1.5, priceLineVisible: false, lastValueVisible: false });
  
   rsiChart = LightweightCharts.createChart(rsiEl, {
+    width:  rw,
+    height: rh,
     layout:   { background: { color: '#080c10' }, textColor: '#5a6a7a', fontFamily: "'Space Mono', monospace", fontSize: 9 },
     grid:     { vertLines: { color: '#111820' }, horzLines: { color: '#111820' } },
     rightPriceScale: { borderColor: '#1e2a35', textColor: '#5a6a7a', scaleMargins: { top: 0.1, bottom: 0.1 } },
@@ -748,15 +761,16 @@ function initCharts() {
     autoscaleInfoProvider: () => ({ priceRange: { minValue: 0, maxValue: 100 } }),
   });
  
-  // Add RSI reference lines
-  [30, 70].forEach(v => {
-    rsiChart.addLineSeries({
-      color: v === 70 ? '#ff475740' : '#00d08440',
-      lineWidth: 1,
-      lineStyle: LightweightCharts.LineStyle.Dashed,
-      priceLineVisible: false,
-      lastValueVisible: false,
-    });
+  // Add RSI reference lines (stored so renderCharts can populate them)
+  rsiRef30 = rsiChart.addLineSeries({
+    color: '#00d08440', lineWidth: 1,
+    lineStyle: LightweightCharts.LineStyle.Dashed,
+    priceLineVisible: false, lastValueVisible: false,
+  });
+  rsiRef70 = rsiChart.addLineSeries({
+    color: '#ff475740', lineWidth: 1,
+    lineStyle: LightweightCharts.LineStyle.Dashed,
+    priceLineVisible: false, lastValueVisible: false,
   });
  
   // Sync time scales
@@ -1002,6 +1016,14 @@ function renderCharts(data) {
  
   rsiSeries.setData(candles.slice(14).map((c, i) => ({ time: c.time, value: rsi14[i + 14] })).filter(p => p.value != null));
  
+  // Populate RSI reference lines
+  if (rsiRef30 && rsiRef70 && candles.length > 0) {
+    const first = candles[0].time;
+    const last  = candles[candles.length - 1].time;
+    rsiRef30.setData([{ time: first, value: 30 }, { time: last, value: 30 }]);
+    rsiRef70.setData([{ time: first, value: 70 }, { time: last, value: 70 }]);
+  }
+ 
   candleChart.timeScale().fitContent();
   rsiChart.timeScale().fitContent();
 }
@@ -1237,4 +1259,3 @@ document.getElementById('apiModal').addEventListener('click', function(e) {
 </script>
 </body>
 </html>
-
