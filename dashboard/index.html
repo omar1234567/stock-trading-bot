@@ -649,13 +649,13 @@ let shariahCache    = {};
 document.addEventListener('DOMContentLoaded', () => {
   buildSidebar();
   // Small delay ensures chart containers are fully sized before init
+  // Wait for layout to settle, then init charts, then load data
   setTimeout(() => {
     initCharts();
     const saved = localStorage.getItem('apiKey');
-    if (!saved) setTimeout(showApiModal, 1500);
-    // Extra delay for charts to fully init before loading data
-    setTimeout(() => loadTicker('NVDA'), 300);
-  }, 400);
+    if (!saved) setTimeout(showApiModal, 2000);
+    setTimeout(() => loadTicker('NVDA'), 500);
+  }, 300);
 });
 
 // ============================================================
@@ -697,118 +697,82 @@ function updateSidebarDot(ticker, status) {
 // ============================================================
 // CHART INIT
 // ============================================================
+function getChartDims() {
+  const sw = document.querySelector('.sidebar')?.offsetWidth || 190;
+  const rw = document.querySelector('.right-panel')?.offsetWidth || 240;
+  const nh = document.querySelector('.nav')?.offsetHeight || 56;
+  const hh = document.querySelector('.ticker-header')?.offsetHeight || 0;
+  const rsiH = 130;
+  const w = Math.max(window.innerWidth - sw - rw, 300);
+  const h = Math.max(window.innerHeight - nh - hh - rsiH - 4, 250);
+  return { w, h, rsiH };
+}
+
 function initCharts() {
   const candleEl = document.getElementById('candle-chart');
   const rsiEl    = document.getElementById('rsi-chart');
+  if (!candleEl || !rsiEl) { console.error('Chart containers missing'); return; }
 
-  // Force explicit pixel dimensions — flex containers can report 0 on first paint
-  const sidebarW  = 190;
-  const rightW    = 240;
-  const navH      = 56;
-  const headerH   = candleEl.closest('.content')?.querySelector('.ticker-header')?.offsetHeight || 60;
-  const rsiH      = 130;
-  const totalH    = window.innerHeight - navH;
-  const cw        = window.innerWidth - sidebarW - rightW;
-  const ch        = Math.max(totalH - rsiH - headerH - 2, 300);
-  const rw        = cw;
-  const rh        = rsiH;
+  const { w, h, rsiH } = getChartDims();
 
-  // Apply explicit CSS heights so flex fills correctly
-  candleEl.style.height = ch + 'px';
-  candleEl.style.width  = cw + 'px';
-  document.querySelector('.rsi-panel').style.height = rh + 'px';
-  document.getElementById('rsi-chart').style.height = rh + 'px';
+  // Set explicit pixel sizes before creating charts
+  candleEl.style.cssText = `width:${w}px;height:${h}px;`;
+  rsiEl.style.cssText    = `width:${w}px;height:${rsiH}px;`;
+  document.querySelector('.rsi-panel').style.height = rsiH + 'px';
 
-  candleChart = LightweightCharts.createChart(candleEl, {
-    width:  cw,
-    height: ch,
-    layout: {
-      background:  { color: '#080c10' },
-      textColor:   '#5a6a7a',
-      fontFamily:  "'Space Mono', monospace",
-      fontSize:    10,
-    },
-    grid: {
-      vertLines:   { color: '#111820' },
-      horzLines:   { color: '#111820' },
-    },
-    crosshair: {
-      mode: LightweightCharts.CrosshairMode.Normal,
+  const baseOpts = (height) => ({
+    width:  w,
+    height: height,
+    layout: { background: { color: '#080c10' }, textColor: '#5a6a7a', fontFamily: "'Space Mono',monospace", fontSize: 10 },
+    grid:   { vertLines: { color: '#111820' }, horzLines: { color: '#111820' } },
+    rightPriceScale: { borderColor: '#1e2a35', textColor: '#5a6a7a' },
+    timeScale: { borderColor: '#1e2a35', timeVisible: true, secondsVisible: false },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Normal,
       vertLine: { color: '#f5a62340', labelBackgroundColor: '#f5a623' },
-      horzLine: { color: '#f5a62340', labelBackgroundColor: '#f5a623' },
-    },
-    rightPriceScale: {
-      borderColor: '#1e2a35',
-      textColor:   '#5a6a7a',
-    },
-    timeScale: {
-      borderColor:     '#1e2a35',
-      timeVisible:     true,
-      secondsVisible:  false,
-    },
+      horzLine: { color: '#f5a62340', labelBackgroundColor: '#f5a623' } },
   });
 
-  candleSeries = candleChart.addCandlestickSeries({
-    upColor:         '#00d084',
-    downColor:       '#ff4757',
-    borderUpColor:   '#00d084',
-    borderDownColor: '#ff4757',
-    wickUpColor:     '#00d08480',
-    wickDownColor:   '#ff475780',
-  });
+  try {
+    candleChart = LightweightCharts.createChart(candleEl, baseOpts(h));
+  } catch(e) { console.error('candleChart failed:', e); return; }
 
-  ema9Series  = candleChart.addLineSeries({ color: '#f5a623', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
-  ema21Series = candleChart.addLineSeries({ color: '#4fc3f7', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
-  ema50Series = candleChart.addLineSeries({ color: '#9c88ff', lineWidth: 1.5, priceLineVisible: false, lastValueVisible: false });
+  try {
+    candleSeries = candleChart.addCandlestickSeries({
+      upColor: '#00d084', downColor: '#ff4757',
+      borderUpColor: '#00d084', borderDownColor: '#ff4757',
+      wickUpColor: '#00d08480', wickDownColor: '#ff475780',
+    });
+    ema9Series  = candleChart.addLineSeries({ color: '#f5a623', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
+    ema21Series = candleChart.addLineSeries({ color: '#4fc3f7', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
+    ema50Series = candleChart.addLineSeries({ color: '#9c88ff', lineWidth: 1.5, priceLineVisible: false, lastValueVisible: false });
+  } catch(e) { console.error('candle series failed:', e); return; }
 
-  rsiChart = LightweightCharts.createChart(rsiEl, {
-    width:  rw,
-    height: rh,
-    layout:   { background: { color: '#080c10' }, textColor: '#5a6a7a', fontFamily: "'Space Mono', monospace", fontSize: 9 },
-    grid:     { vertLines: { color: '#111820' }, horzLines: { color: '#111820' } },
-    rightPriceScale: { borderColor: '#1e2a35', textColor: '#5a6a7a', scaleMargins: { top: 0.1, bottom: 0.1 } },
-    timeScale: { borderColor: '#1e2a35', timeVisible: true },
-    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
-  });
+  try {
+    rsiChart = LightweightCharts.createChart(rsiEl, {
+      ...baseOpts(rsiH),
+      rightPriceScale: { borderColor: '#1e2a35', textColor: '#5a6a7a', scaleMargins: { top: 0.1, bottom: 0.1 } },
+    });
+    rsiSeries = rsiChart.addLineSeries({ color: '#f5a623', lineWidth: 1.5, priceLineVisible: false, lastValueVisible: true });
+    rsiRef30  = rsiChart.addLineSeries({ color: '#00d08450', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, priceLineVisible: false, lastValueVisible: false });
+    rsiRef70  = rsiChart.addLineSeries({ color: '#ff475750', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, priceLineVisible: false, lastValueVisible: false });
+  } catch(e) { console.error('rsiChart failed:', e); rsiChart = null; }
 
-  rsiSeries = rsiChart.addLineSeries({
-    color: '#f5a623', lineWidth: 1.5, priceLineVisible: false, lastValueVisible: true,
-    autoscaleInfoProvider: () => ({ priceRange: { minValue: 0, maxValue: 100 } }),
-  });
+  // Sync timescales
+  if (candleChart && rsiChart) {
+    candleChart.timeScale().subscribeVisibleLogicalRangeChange(r => { if (r) rsiChart.timeScale().setVisibleLogicalRange(r); });
+    rsiChart.timeScale().subscribeVisibleLogicalRangeChange(r => { if (r) candleChart.timeScale().setVisibleLogicalRange(r); });
+  }
 
-  // Add RSI reference lines (stored so renderCharts can populate them)
-  rsiRef30 = rsiChart.addLineSeries({
-    color: '#00d08440', lineWidth: 1,
-    lineStyle: LightweightCharts.LineStyle.Dashed,
-    priceLineVisible: false, lastValueVisible: false,
-  });
-  rsiRef70 = rsiChart.addLineSeries({
-    color: '#ff475740', lineWidth: 1,
-    lineStyle: LightweightCharts.LineStyle.Dashed,
-    priceLineVisible: false, lastValueVisible: false,
-  });
-
-  // Sync time scales
-  candleChart.timeScale().subscribeVisibleLogicalRangeChange(range => {
-    if (range) rsiChart.timeScale().setVisibleLogicalRange(range);
-  });
-  rsiChart.timeScale().subscribeVisibleLogicalRangeChange(range => {
-    if (range) candleChart.timeScale().setVisibleLogicalRange(range);
-  });
-
-  // Resize observer — recalculate on window resize
+  // Resize handler
   window.addEventListener('resize', () => {
-    const sw   = 190, rw2 = 240, nh = 56;
-    const rsiH2 = 130;
-    const hdrH  = candleEl.closest('.content')?.querySelector('.ticker-header')?.offsetHeight || 60;
-    const newCW = window.innerWidth - sw - rw2;
-    const newCH = Math.max(window.innerHeight - nh - rsiH2 - hdrH - 2, 300);
-    candleEl.style.height = newCH + 'px';
-    candleEl.style.width  = newCW + 'px';
-    if (candleChart) candleChart.applyOptions({ width: newCW, height: newCH });
-    if (rsiChart)    rsiChart.applyOptions({ width: newCW, height: rsiH2 });
+    const d = getChartDims();
+    candleEl.style.cssText = `width:${d.w}px;height:${d.h}px;`;
+    rsiEl.style.cssText    = `width:${d.w}px;height:${d.rsiH}px;`;
+    if (candleChart) candleChart.applyOptions({ width: d.w, height: d.h });
+    if (rsiChart)    rsiChart.applyOptions({ width: d.w, height: d.rsiH });
   });
 }
+
 
 // ============================================================
 // LOAD TICKER
@@ -1023,7 +987,10 @@ function estimateSignal(data) {
 // RENDER CHARTS
 // ============================================================
 function renderCharts(data) {
-  if (!candleSeries || !rsiSeries) { console.warn('Charts not ready'); return; }
+  if (!candleChart || !candleSeries || !ema9Series || !ema21Series || !ema50Series) {
+    console.warn('Candle chart not ready — skipping render');
+    return;
+  }
   const { candles, ema9, ema21, ema50, rsi14 } = data;
 
   candleSeries.setData(candles.map(c => ({ time: c.time, open: c.open, high: c.high, low: c.low, close: c.close })));
