@@ -17,11 +17,24 @@ import anthropic
 from tracker import log_signal, resolve_open_trades, generate_performance_summary, get_recent_closed_trades
 
 # ============================================================
+# IBKR EXECUTION — set to True when TWS is running and ready
+# ============================================================
+ENABLE_IBKR_EXECUTION = False   # ← Flip to True when your TWS is set up
+
+if ENABLE_IBKR_EXECUTION:
+    try:
+        from ibkr_executor import execute_from_report
+        print("✅ IBKR executor loaded")
+    except ImportError:
+        ENABLE_IBKR_EXECUTION = False
+        print("⚠️  ibkr_executor import failed — execution disabled")
+
+# ============================================================
 # YOUR WATCHLIST — Add or remove tickers here anytime
 # ============================================================
 
 WATCHLIST = {
-    "US": [
+    "US_LARGE_CAP": [
         # ── Semiconductors & Hardware ──────────────────────────
         "NVDA", "AAPL", "MSFT", "AVGO", "AMD",
         "MU", "LRCX", "AMAT", "TXN", "KLAC",
@@ -43,18 +56,22 @@ WATCHLIST = {
         # ── Industrials & Transport ───────────────────────────
         "CAT", "DE", "HON", "GEV",
         "ODFL", "JBHT", "EXPD",
+    ],
+    "US_MID_CAP": [
         # ── Healthcare & Medical Devices ──────────────────────
-        "PODD", "HOLX", "TECH", "EXAS", "INSP",
-        "ITGR", "NVCR", "PCVX", "RXRX",
+        "PODD", "HOLX", "TECH", "CRNX", "EXAS",
+        "INSP", "ITGR", "NVCR", "PCVX", "RXRX",
         # ── Technology & Software ─────────────────────────────
         "AXON", "TRMB", "ENTG", "ACLS", "ONTO",
-        "MKSI", "SITM", "SMTC", "DIOD",
+        "MKSI", "WOLF", "SITM", "SMTC", "DIOD",
         # ── Industrials & Logistics ───────────────────────────
-        "SAIA", "XPO", "CHRW", "GNRC",
+        "SAIA", "XPO", "CHRW", "GNRC", "ATI",
+        "AAON", "FELE", "HURN", "IESC", "KTOS",
         # ── Consumer ──────────────────────────────────────────
-        "DECK", "WSM", "LULU", "WING", "CELH", "ELF",
+        "DECK", "WSM", "LULU", "WING", "CELH",
+        "ELF",
     ],
-    "TSX": [
+    "TSX_LARGE_CAP": [
         # ── Technology ────────────────────────────────────────
         "CSU.TO", "SHOP.TO", "OTEX.TO", "GIB-A.TO",
         # ── Industrials & Transport ───────────────────────────
@@ -69,6 +86,8 @@ WATCHLIST = {
         "ATD.TO", "DOL.TO", "CTC-A.TO",
         # ── Automotive & Manufacturing ────────────────────────
         "MG.TO", "MRE.TO",
+    ],
+    "TSX_MID_CAP": [
         # ── Technology & Software ─────────────────────────────
         "KXS.TO", "DSG.TO", "LSPD.TO",
         "MDA.TO", "ATA.TO",
@@ -128,6 +147,18 @@ PHASE 2 FILTER RULES — apply these to every signal:
 - EARNINGS: If the earnings warning shows "EARNINGS IN X DAY(S)", label the trade as "🔴 HIGH RISK — EARNINGS IMMINENT" and note that the trade carries elevated volatility risk
 - VOLUME: If the volume signal shows WEAK or LOW VOLUME, note this in the Key Risks section as a lack of conviction
 - SECTOR MOMENTUM: If sector momentum is BEARISH and the signal is LONG, add a note warning of sector headwind. If sector is BULLISH and signal is LONG, note this as a tailwind that improves the setup
+
+FIX #2 — SIGNAL FRESHNESS RULES:
+- If the pre-market data shows the signal is STALE (price gapped more than 2%), you MUST flag the trade as "⚠️ STALE SIGNAL" and adjust the entry price to reflect the pre-market price
+- If the gap is more than 3%, DO NOT recommend the trade at all — the technical setup has been invalidated by the gap
+- If pre-market shows a gap DOWN on a bullish signal, this is a serious warning — note it prominently
+- If pre-market shows a gap UP on a bullish signal, adjust the entry zone upward and recalculate R:R
+
+FIX #5 — RSI DIVERGENCE RULES:
+- BEARISH DIVERGENCE present: Reduce the probability of success by 15-20%. Add "⚠️ BEARISH RSI DIVERGENCE DETECTED" to Key Risks. Note that even if all 4 criteria pass, bearish divergence is a leading indicator of momentum failure
+- STRONG BEARISH DIVERGENCE: Do NOT recommend the trade regardless of other signals — divergence overrides
+- BULLISH DIVERGENCE present: This is a positive confirmation — increase probability by 10% and note it as an additional supporting signal
+- Always mention divergence status in the Technical Reasoning section
 
 OUTPUT FORMAT — Use this exact layout for each trade:
 
@@ -576,6 +607,101 @@ def describe_candlesticks(df):
     return descriptions
 
 
+def get_premarket_price(ticker):
+    """
+    Fetch the current pre-market or real-time price to validate signal freshness.
+    Returns (current_price, pct_change_from_close, is_valid) tuple.
+    A signal is considered stale if price has moved more than 2% from signal close.
+    """
+    try:
+        stock      = yf.Ticker(ticker)
+        info       = stock.info
+        prev_close = info.get("previousClose") or info.get("regularMarketPreviousClose")
+        pre_price  = (info.get("preMarketPrice") or
+                      info.get("regularMarketPrice") or
+                      info.get("currentPrice"))
+
+        if not pre_price or not prev_close:
+            return None, 0, True   # Can't check — assume valid
+
+        pct_change = (pre_price - prev_close) / prev_close * 100
+        # Signal is stale if pre-market has gapped more than 2% in either direction
+        is_valid   = abs(pct_change) <= 2.0
+
+        return round(pre_price, 2), round(pct_change, 2), is_valid
+
+    except Exception:
+        return None, 0, True   # On error, don't block the signal
+
+
+def detect_rsi_divergence(df, rsi_col="RSI", price_col="Close", lookback=20):
+    """
+    Detect bullish and bearish RSI divergence over the last N candles.
+
+    Bearish divergence: price makes higher high, RSI makes lower high → warning
+    Bullish divergence: price makes lower low,  RSI makes higher low  → opportunity
+
+    Returns: (divergence_type, strength, description)
+      divergence_type: "BEARISH" | "BULLISH" | "NONE"
+      strength:        "STRONG" | "MODERATE" | "NONE"
+    """
+    if len(df) < lookback + 5:
+        return "NONE", "NONE", "Insufficient data"
+
+    recent     = df.tail(lookback)
+    prices     = recent[price_col].values
+    rsi_vals   = recent[rsi_col].values
+
+    # Find swing highs and lows
+    def find_swings(arr, swing_type="high", window=5):
+        swings = []
+        for i in range(window, len(arr) - window):
+            if swing_type == "high":
+                if arr[i] == max(arr[i-window:i+window+1]):
+                    swings.append((i, arr[i]))
+            else:
+                if arr[i] == min(arr[i-window:i+window+1]):
+                    swings.append((i, arr[i]))
+        return swings
+
+    price_highs = find_swings(prices,   "high", 3)
+    price_lows  = find_swings(prices,   "low",  3)
+    rsi_highs   = find_swings(rsi_vals, "high", 3)
+    rsi_lows    = find_swings(rsi_vals, "low",  3)
+
+    # Bearish divergence: price higher high + RSI lower high
+    bearish_div = "NONE"
+    if len(price_highs) >= 2 and len(rsi_highs) >= 2:
+        ph1, ph2 = price_highs[-2][1], price_highs[-1][1]
+        rh1, rh2 = rsi_highs[-2][1],  rsi_highs[-1][1]
+        if ph2 > ph1 and rh2 < rh1:
+            diff = abs(rh1 - rh2)
+            bearish_div = "STRONG" if diff > 8 else "MODERATE"
+
+    # Bullish divergence: price lower low + RSI higher low
+    bullish_div = "NONE"
+    if len(price_lows) >= 2 and len(rsi_lows) >= 2:
+        pl1, pl2 = price_lows[-2][1],  price_lows[-1][1]
+        rl1, rl2 = rsi_lows[-2][1],    rsi_lows[-1][1]
+        if pl2 < pl1 and rl2 > rl1:
+            diff = abs(rl1 - rl2)
+            bullish_div = "STRONG" if diff > 8 else "MODERATE"
+
+    if bearish_div != "NONE":
+        desc = (f"⚠️ BEARISH DIVERGENCE ({bearish_div}): "
+                f"Price made higher high but RSI made lower high — "
+                f"momentum weakening, potential reversal risk")
+        return "BEARISH", bearish_div, desc
+
+    if bullish_div != "NONE":
+        desc = (f"✅ BULLISH DIVERGENCE ({bullish_div}): "
+                f"Price made lower low but RSI made higher low — "
+                f"momentum strengthening, potential reversal opportunity")
+        return "BULLISH", bullish_div, desc
+
+    return "NONE", "NONE", "No divergence detected — price and RSI aligned"
+
+
 def analyze_ticker(ticker):
     """Download data and build a full technical + fundamental summary for one ticker"""
     try:
@@ -658,6 +784,28 @@ def analyze_ticker(ticker):
         earnings_flag = "⚠️ HIGH RISK — EARNINGS IMMINENT" if has_earnings else ""
         volume_flag   = "" if vol_confirmed else "⚠️ LOW VOLUME — weak conviction"
 
+        # --- Fix #2: Signal Freshness — Pre-market price validation ---
+        print(f"     📡 Checking pre-market price for {ticker}...")
+        pre_price, pre_pct, signal_fresh = get_premarket_price(ticker)
+        if pre_price:
+            freshness_status = (
+                f"✅ FRESH — Pre-market: ${pre_price} ({pre_pct:+.2f}% vs close)"
+                if signal_fresh else
+                f"⚠️ STALE — Pre-market gapped {pre_pct:+.2f}% (>${abs(pre_pct):.1f}% move invalidates signal)"
+            )
+            freshness_flag = "" if signal_fresh else f"⚠️ SIGNAL MAY BE STALE — price has gapped {pre_pct:+.2f}% pre-market"
+        else:
+            freshness_status = "Pre-market data unavailable — validate manually at open"
+            freshness_flag   = ""
+
+        # --- Fix #5: RSI Divergence Detection ---
+        div_type, div_strength, div_desc = detect_rsi_divergence(df)
+        divergence_flag = ""
+        if div_type == "BEARISH":
+            divergence_flag = f"⚠️ BEARISH RSI DIVERGENCE ({div_strength}) — reduces signal conviction"
+        elif div_type == "BULLISH":
+            divergence_flag = f"✅ BULLISH RSI DIVERGENCE ({div_strength}) — increases signal conviction"
+
         # --- Shariah Compliance ---
         print(f"     ☪  Running Shariah screen for {ticker}...")
         shariah = shariah_screen(ticker)
@@ -700,6 +848,15 @@ PHASE 2 — SIGNAL FILTERS:
   Earnings Warning: {earnings_detail} {earnings_flag}
   Volume Signal:    {vol_detail} {volume_flag}
   Sector Momentum:  {sector_detail}
+
+FIX #2 — SIGNAL FRESHNESS:
+  Pre-Market Price: {freshness_status}
+  {freshness_flag}
+
+FIX #5 — RSI DIVERGENCE (last 20 candles):
+  Divergence Type:  {div_type} ({div_strength})
+  Analysis:         {div_desc}
+  {divergence_flag}
 {shariah_block}
 """
         return summary
@@ -773,7 +930,7 @@ Provide your full daily trading report now."""
 # EMAIL
 # ============================================================
 
-def send_email(report, perf_summary, recent_trades, sp500, tsx, market_warning):
+def send_email(report, perf_summary, recent_trades, sp500, tsx, market_warning, execution_summary=""):
     """Send the daily report as a formatted HTML email"""
     today_str = datetime.now().strftime("%A, %B %d, %Y")
     subject   = f"📈 Daily Trade Signals — {today_str}"
@@ -820,6 +977,12 @@ def send_email(report, perf_summary, recent_trades, sp500, tsx, market_warning):
 
 Recent Closed Trades:
 {recent_trades}
+  </div>
+  <h2 style="color:#154360;font-size:16px;">🤖 Execution Report</h2>
+  <div style="white-space:pre-wrap;line-height:1.8;font-size:13px;
+              font-family:'Courier New',monospace;background:#f8f9fa;
+              padding:16px;border-radius:6px;">
+{execution_summary}
   </div>
   <hr style="margin-top:40px;border:1px solid #ddd;">
   <p style="color:#aaa;font-size:11px;">
@@ -898,7 +1061,12 @@ def _auto_log_signals(report):
 def main():
     print(f"🤖 Stock Bot starting — {datetime.now().strftime('%Y-%m-%d %H:%M UTC')}")
 
-    all_tickers = WATCHLIST["US"] + WATCHLIST["TSX"]
+    all_tickers = (
+        WATCHLIST["US_LARGE_CAP"] +
+        WATCHLIST["US_MID_CAP"] +
+        WATCHLIST["TSX_LARGE_CAP"] +
+        WATCHLIST["TSX_MID_CAP"]
+    )
     print(f"📊 Watchlist: {len(all_tickers)} tickers\n")
 
     # --- Phase 2: Fetch market context once for the whole session ---
@@ -940,6 +1108,15 @@ MARKET CONTEXT (checked before individual stocks)
     print("📝 Logging today's signals...")
     _auto_log_signals(report)
 
+    # IBKR Auto-execution (only runs if ENABLE_IBKR_EXECUTION = True)
+    execution_summary = ""
+    if ENABLE_IBKR_EXECUTION:
+        print("🤖 Executing signals via IBKR...")
+        execution_summary = execute_from_report(report)
+        print(execution_summary[:300])
+    else:
+        execution_summary = "\n🤖 Auto-execution is OFF — signals are for manual review only.\n"
+
     # Build performance summary
     perf_summary  = generate_performance_summary()
     recent_trades = get_recent_closed_trades(10)
@@ -947,12 +1124,11 @@ MARKET CONTEXT (checked before individual stocks)
     market_warning = sp500.get("warning", False) or tsx.get("warning", False)
 
     print("📧 Sending email...")
-    send_email(report, perf_summary, recent_trades, sp500, tsx, market_warning)
+    send_email(report, perf_summary, recent_trades, sp500, tsx, market_warning, execution_summary)
 
     print("✅ Done!")
 
 
 if __name__ == "__main__":
     main()
-
 
