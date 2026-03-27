@@ -634,6 +634,125 @@ function patternStats(matches){
   return{winRate:Math.round(wins/closed.length*100),total:closed.length,wins,losses:closed.length-wins,recentWins:recent.filter(m=>m.outcome==="WIN").length,recentTotal:recent.length};
 }
 
+// ── WEEKLY MULTI-TIMEFRAME (#7) ──────────────────────────
+async function getWeeklyStructure(ticker){
+  try{
+    const url=`https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?interval=1wk&range=2y`;
+    const proxies=[`https://corsproxy.io/?${encodeURIComponent(url)}`,`https://api.allorigins.win/get?url=${encodeURIComponent(url)}`];
+    let result=null;
+    for(const p of proxies){
+      try{
+        const ctrl=new AbortController(),t=setTimeout(()=>ctrl.abort(),9000);
+        const r=await fetch(p,{signal:ctrl.signal});clearTimeout(t);
+        if(!r.ok)continue;
+        const tx=await r.text();let raw;
+        try{const j=JSON.parse(tx);raw=j.contents?JSON.parse(j.contents):j;}catch{continue;}
+        if(raw?.chart?.result?.[0]){result=raw.chart.result[0];break;}
+      }catch{continue;}
+    }
+    if(!result)return{bullish:false,score:0,detail:"Weekly data unavailable"};
+
+    const q=result.indicators.quote[0];
+    const closes=result.timestamp.map((_,i)=>q.close[i]).filter(Boolean);
+    if(closes.length<40)return{bullish:false,score:0,detail:"Insufficient weekly data"};
+
+    const n=closes.length-1;
+    const e20=ema(closes,20)[n],e50=ema(closes,50)[n];
+    const rsiW=rsiCalc(closes,14)[n];
+    const price=closes[n];
+    const lastOpen=q.open[q.open.length-1];
+    const lastClose=closes[n];
+
+    const c1=price>e20, c2=price>e50, c3=e20>e50;
+    const c4=rsiW>=45&&rsiW<=75;
+    const c5=lastClose>lastOpen;
+    const score=+c1+ +c2+ +c3+ +c4+ +c5;
+    const bullish=score>=4;
+
+    const prev4avg=(closes.slice(n-5,n-1).reduce((a,b)=>a+b,0)/4);
+    const trend=price>prev4avg*1.01?"UPTREND":price<prev4avg*0.99?"DOWNTREND":"SIDEWAYS";
+
+    return{
+      bullish, score,
+      detail:`Score ${score}/5 | vs EMA20: ${c1?"ABOVE":"BELOW"} ($${e20?.toFixed(2)}) | vs EMA50: ${c2?"ABOVE":"BELOW"} ($${e50?.toFixed(2)}) | EMA align: ${c3?"BULL":"BEAR"} | RSI: ${rsiW?.toFixed(1)} | Candle: ${c5?"BULL":"BEAR"} | ${trend}`,
+      c1,c2,c3,c4,c5,rsiW,e20,e50,trend
+    };
+  }catch(e){return{bullish:false,score:0,detail:"Error: "+e.message};}
+}
+
+// ── VOLUME PROFILE ANALYSIS (#6) ─────────────────────────
+function analyseVolumeProfile(candles, lookback=50){
+  if(candles.length<lookback) return{summary:"Insufficient data",score:0,signals:[]};
+  const recent=candles.slice(-lookback);
+  const signals=[];let score=0;
+
+  const avgVol=recent.reduce((a,c)=>a+c.v,0)/recent.length;
+  const closes=recent.map(c=>c.c);
+  const highs =recent.map(c=>c.h);
+  const lows  =recent.map(c=>c.l);
+  const vols  =recent.map(c=>c.v);
+
+  // 1. High-Volume Node proximity
+  const pMin=Math.min(...lows), pMax=Math.max(...highs);
+  if(pMax>pMin){
+    const bins=20, bSize=(pMax-pMin)/bins;
+    const vbp={};
+    for(let i=0;i<recent.length;i++){
+      const mid=(highs[i]+lows[i])/2;
+      const b=Math.min(Math.floor((mid-pMin)/bSize),bins-1);
+      vbp[b]=(vbp[b]||0)+vols[i];
+    }
+    const maxB=Object.entries(vbp).sort((a,b)=>b[1]-a[1])[0];
+    if(maxB){
+      const hvn=pMin+(+maxB[0]+0.5)*bSize;
+      const dist=Math.abs(closes[closes.length-1]-hvn)/closes[closes.length-1]*100;
+      if(dist<3){signals.push(`Price near high-volume node $${hvn.toFixed(2)} (${dist.toFixed(1)}% away) — strong S/R`);score+=2;}
+      else if(dist<6){signals.push(`Approaching HVN $${hvn.toFixed(2)} (${dist.toFixed(1)}% away)`);score+=1;}
+    }
+  }
+
+  // 2. Up-day vs Down-day volume
+  const upDays=recent.filter(c=>c.c>c.o), dnDays=recent.filter(c=>c.c<c.o);
+  const avU=upDays.length>3?upDays.reduce((a,c)=>a+c.v,0)/upDays.length:avgVol;
+  const avD=dnDays.length>3?dnDays.reduce((a,c)=>a+c.v,0)/dnDays.length:avgVol;
+  if(avU>avD*1.3){signals.push(`ACCUMULATION — up-day vol ${(avU/avgVol).toFixed(1)}x vs down-day ${(avD/avgVol).toFixed(1)}x`);score+=2;}
+  else if(avD>avU*1.3){signals.push(`DISTRIBUTION — down-day vol ${(avD/avgVol).toFixed(1)}x vs up-day ${(avU/avgVol).toFixed(1)}x`);score-=2;}
+  else signals.push(`Balanced vol — up ${(avU/avgVol).toFixed(1)}x / down ${(avD/avgVol).toFixed(1)}x`);
+
+  // 3. Volume divergence (last 10)
+  const l10=recent.slice(-10);
+  const pc=(l10[l10.length-1].c-l10[0].c)/l10[0].c;
+  const v1=l10.slice(0,5).reduce((a,c)=>a+c.v,0)/5;
+  const v2=l10.slice(5).reduce((a,c)=>a+c.v,0)/5;
+  const vc=(v2-v1)/(v1+1e-10);
+  if(pc>0.02&&vc<-0.2){signals.push(`VOLUME DIVERGENCE — price +${(pc*100).toFixed(1)}% but vol -${(Math.abs(vc)*100).toFixed(0)}% — rally weakening`);score-=2;}
+  else if(pc<-0.02&&vc<-0.2){signals.push("Selling on declining volume — downmove losing momentum");score+=1;}
+  else if(pc>0.01&&vc>0.2){signals.push(`Price rise confirmed by vol expansion +${(vc*100).toFixed(0)}%`);score+=2;}
+
+  // 4. OBV slope
+  let obv=0;const obvArr=[];
+  for(let i=0;i<recent.length;i++){
+    if(i>0){if(recent[i].c>recent[i-1].c)obv+=vols[i];else if(recent[i].c<recent[i-1].c)obv-=vols[i];}
+    obvArr.push(obv);
+  }
+  const obvSlope=(obvArr[obvArr.length-1]-obvArr[obvArr.length-10])/(Math.abs(obvArr[obvArr.length-10])+1e-10);
+  if(obvSlope>0.05){signals.push("OBV rising — net accumulation (institutional buying)");score+=1;}
+  else if(obvSlope<-0.05){signals.push("OBV falling — net distribution (institutional selling)");score-=1;}
+
+  // 5. Volume climax
+  const ranges=recent.map(c=>c.h-c.l);
+  const avgR=ranges.reduce((a,b)=>a+b,0)/ranges.length;
+  for(let i=recent.length-5;i<recent.length;i++){
+    if(vols[i]>avgVol*3&&ranges[i]<avgR*0.7){
+      signals.push(`VOLUME CLIMAX ${recent.length-1-i} days ago — extreme vol + small range = exhaustion risk`);
+      score-=1;break;
+    }
+  }
+
+  const summary=score>=3?"STRONGLY BULLISH VOLUME":score>=1?"BULLISH VOLUME":score===0?"NEUTRAL VOLUME":score>=-2?"CAUTIONARY VOLUME":"BEARISH VOLUME";
+  return{summary:`${summary} (${score>=0?"+":""}${score})`,score,signals};
+}
+
 // ── RSI DIVERGENCE DETECTION (Fix #5) ────────────────────
 function detectRSIDivergence(candles, rsi14, lookback=20){
   if(candles.length < lookback+5 || rsi14.length < lookback+5)
@@ -825,13 +944,20 @@ async function go(sym){
     const ac=al==="BULLISH"?"up":al==="BEARISH"?"dn":"wn";
     
 
+    // Fix #6 — Volume profile (synchronous)
+    const volProfile = analyseVolumeProfile(candles, 50);
+
     // Fix #5 — RSI divergence check
     const divResult = detectRSIDivergence(candles, rsi14, 25);
 
-    // Fix #2 — Signal freshness (compare close vs real-time price)
+    // Fix #2 — Signal freshness
     const freshnessResult = checkSignalFreshness(candles, price);
 
     const sig=estSig(price,e9v,e21v,e50v,rsiV,candles,e200v,atrVal);
+
+    // Fix #7 — Weekly structure (async fetch)
+    let weeklyResult={bullish:false,score:0,detail:"Loading..."};
+    getWeeklyStructure(sym).then(wr=>{weeklyResult=wr;renderWeeklyPanel(wr,sig);});
 
     document.getElementById("PT").innerHTML=`<div class="row"><span class="lbl">RSI (14)</span><span class="val ${rsiV<30?"up":rsiV>70?"dn":""}">${rsiV}</span></div><div class="row"><span class="lbl">EMA 9</span><span class="val">${e9v}</span></div><div class="row"><span class="lbl">EMA 21</span><span class="val">${e21v}</span></div><div class="row"><span class="lbl">EMA 50</span><span class="val">${e50v}</span></div><div class="row"><span class="lbl">EMA Align</span><span class="val ${e9v>e21v&&e21v>e50v?"up":e9v<e21v&&e21v<e50v?"dn":"wn"}">${e9v>e21v&&e21v>e50v?"BULLISH":e9v<e21v&&e21v<e50v?"BEARISH":"MIXED"}</span></div><div class="row"><span class="lbl">vs EMA 50</span><span class="val ${price>e50v?"up":"dn"}">${price>e50v?"ABOVE":"BELOW"}</span></div><div class="row"><span class="lbl">Vol vs Avg</span><span class="val ${volR>=100?"up":"wn"}">${volR}%</span></div><div style="border-top:1px solid var(--border);margin:5px 0;padding-top:5px"><div class="row"><span class="lbl">RSI Divergence</span><span class="val ${divResult.type==="BEARISH"?"dn":divResult.type==="BULLISH"?"up":""}">${divResult.type==="NONE"?"NONE":divResult.type+" ("+divResult.strength+")"}</span></div><div class="row"><span class="lbl">Signal Fresh</span><span class="val ${freshnessResult.fresh?"up":freshnessResult.stale?"dn":"wn"}">${freshnessResult.fresh?"FRESH ✓":freshnessResult.stale?"STALE ✗":"ADJUSTED"}</span></div><div class="row"><span class="lbl">Price move</span><span class="val ${freshnessResult.pctMove>=0?"up":"dn"}">${freshnessResult.pctMove>=0?"+":""}${freshnessResult.pctMove}%</span></div></div>`;
     // Fix #2 — Freshness banner
@@ -917,6 +1043,18 @@ async function go(sym){
           ${sec.ret20!==undefined?`<div class="row"><span class="lbl">20d Return</span><span class="val ${sec.ret20>=0?"up":"dn"}">${sec.ret20>=0?"+":""}${sec.ret20}%</span></div>`:""}
         </div>`;
 
+        // 1b. Volume profile
+        const vpColor=sec.label==="BULLISH"?"var(--green)":sec.label==="BEARISH"?"var(--red)":"var(--amber)";
+
+        // Volume profile already calculated synchronously — render it
+        html+=`<div style="border-top:1px solid var(--border);padding-top:8px;margin-top:4px">
+          <div style="font-size:9px;font-weight:700;letter-spacing:1.5px;color:var(--muted);margin-bottom:6px">VOLUME PROFILE (Fix #6)</div>
+          <div class="row"><span class="lbl">Assessment</span><span class="val ${volProfile.score>=1?"up":volProfile.score<=-1?"dn":"wn"}">${volProfile.summary}</span></div>
+          <div style="background:var(--bg3);border-radius:5px;padding:7px 9px;margin-top:6px;font-size:10px;line-height:1.8;">
+            ${volProfile.signals.map(s=>`${s.startsWith("ACCUMULATION")||s.startsWith("Price near")||s.includes("confirmed")||s.includes("OBV rising")||s.includes("Selling on")?'<span style="color:var(--green)">+</span>':'<span style="color:var(--red)">-</span>'} ${s}`).join("<br>")||"No signals"}
+          </div>
+        </div>`;
+
         // 2. Pattern matching
         const matches=findSimilarSetups(candles,e9a,e21a,e50a,rsi14,atrArr);
         const stats=patternStats(matches);
@@ -964,6 +1102,43 @@ async function go(sym){
   }
 }
 
+// ── RENDER WEEKLY PANEL ──────────────────────────────────
+function renderWeeklyPanel(wr, sig){
+  const perf=document.getElementById("PERF");
+  if(!perf)return;
+
+  const wCol=wr.bullish?"var(--green)":wr.score>=3?"var(--amber)":"var(--red)";
+  const wLabel=wr.bullish?"BULLISH":wr.score>=3?"MIXED":"BEARISH";
+  const wIcon=wr.bullish?"▲":wr.score>=3?"◆":"▼";
+
+  // Inject weekly section at top of PERF panel
+  const existingWeekly=document.getElementById("WEEKLY_SECTION");
+  const weeklyHtml=`<div id="WEEKLY_SECTION" style="margin-bottom:10px">
+    <div style="font-size:9px;font-weight:700;letter-spacing:1.5px;color:var(--muted);margin-bottom:6px">WEEKLY TIMEFRAME (Fix #7)</div>
+    <div class="row">
+      <span class="lbl">Weekly structure</span>
+      <span class="val" style="color:${wCol}">${wIcon} ${wLabel} (${wr.score}/5)</span>
+    </div>
+    ${wr.c1!==undefined?`
+    <div style="background:var(--bg3);border-radius:5px;padding:7px 9px;margin-top:6px;font-size:10px;line-height:1.8;">
+      ${wr.c1?'<span style="color:var(--green)">✓</span>':'<span style="color:var(--red)">✗</span>'} Price above weekly EMA 20<br>
+      ${wr.c2?'<span style="color:var(--green)">✓</span>':'<span style="color:var(--red)">✗</span>'} Price above weekly EMA 50<br>
+      ${wr.c3?'<span style="color:var(--green)">✓</span>':'<span style="color:var(--red)">✗</span>'} Weekly EMA 20 > EMA 50<br>
+      ${wr.c4?'<span style="color:var(--green)">✓</span>':'<span style="color:var(--red)">✗</span>'} Weekly RSI 45-75 (${wr.rsiW?.toFixed(1)})<br>
+      ${wr.c5?'<span style="color:var(--green)">✓</span>':'<span style="color:var(--red)">✗</span>'} Last weekly candle bullish
+    </div>` : ""}
+    ${!wr.bullish?`<div style="background:rgba(255,71,87,.1);border:1px solid rgba(255,71,87,.3);border-radius:5px;padding:6px 9px;margin-top:6px;font-size:10px;color:var(--red);">
+      ⚠️ Daily signal opposes weekly trend — higher risk trade
+    </div>`:""}
+  </div>`;
+
+  if(existingWeekly){
+    existingWeekly.outerHTML=weeklyHtml;
+  } else {
+    perf.insertAdjacentHTML("afterbegin", weeklyHtml);
+  }
+}
+
 // ── SCAN ALL TICKERS ─────────────────────────────────────
 let scanRunning=false;
 
@@ -997,6 +1172,9 @@ async function scanAll(){
       const e9v=ema(closes,9)[sn],e21v=ema(closes,21)[sn],e50v=ema(closes,50)[sn],rsiV=rsiCalc(closes,14)[sn];
       const e200av=calcEMA200(closes);const atrAv=calcATR(sc,14);
       const price=meta.regularMarketPrice||closes[sn];
+      const volP=analyseVolumeProfile(sc,50);
+      // Skip if volume is strongly bearish
+      if(volP.score<=-3)continue;
       const sig=estSig(price,e9v,e21v,e50v,rsiV,sc,e200av[sn],atrAv[sn]);
       const dot=document.getElementById("dt_"+sym);
       if(sig){
