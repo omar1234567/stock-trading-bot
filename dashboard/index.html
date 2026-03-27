@@ -64,6 +64,13 @@ canvas{display:block;}
 .ps-input:focus{border-color:var(--amber);}
 .ps-result{background:var(--bg3);border-radius:6px;padding:8px 10px;margin-top:8px;font-size:11px;line-height:1.8;}
 @keyframes sp{to{transform:rotate(360deg);}}
+.zoom-bar{position:absolute;bottom:130px;right:14px;display:flex;gap:3px;z-index:10;}
+.zb{background:var(--bg3);color:var(--muted);border:1px solid var(--border);border-radius:4px;padding:3px 7px;font-family:"Space Mono",monospace;font-size:9px;font-weight:700;cursor:pointer;transition:all .15s;}
+.zb:hover,.zb.active{background:var(--amber);color:#080c10;border-color:var(--amber);}
+#TOOLTIP{position:fixed;background:rgba(13,18,25,.96);border:1px solid var(--border);border-radius:6px;padding:8px 10px;font-size:10px;line-height:1.7;pointer-events:none;display:none;z-index:200;min-width:150px;}
+#SB_SUMMARY{padding:8px 12px;border-bottom:1px solid var(--border);background:var(--bg3);font-size:9px;}
+.corr-warn{background:rgba(255,71,87,.1);border:1px solid rgba(255,71,87,.3);border-radius:5px;padding:6px 9px;font-size:10px;color:var(--red);margin-bottom:8px;}
+.age-warn{background:rgba(245,166,35,.1);border:1px solid rgba(245,166,35,.3);border-radius:5px;padding:6px 9px;font-size:10px;color:var(--amber);margin-bottom:8px;}
 .mbg{display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:999;align-items:center;justify-content:center;}
 .mbg.show{display:flex;}
 .modal{background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:22px;width:340px;max-width:92vw;}
@@ -88,11 +95,25 @@ canvas{display:block;}
   </div>
   <button class="ba" onclick="go(document.getElementById('SI').value)">ANALYSE</button>
   <button class="bo" id="SCANBTN" onclick="scanAll()" style="white-space:nowrap;">&#9654; SCAN ALL</button>
+  <button class="bo" onclick="exportSignal()" id="EXPBTN" style="display:none">&#8613; EXPORT</button>
   <button class="bo" onclick="openM()">API KEY</button>
 </div>
-<aside id="SB"></aside>
+<div id="TOOLTIP"></div>
+<aside id="SB">
+  <div id="SB_SUMMARY" style="display:none">
+    <span id="SB_SIGNALS" style="color:var(--green);font-weight:700">0</span> signals &nbsp;|&nbsp;
+    <span id="SB_REGIME_S" style="color:var(--muted)">—</span>
+  </div>
+</aside>
 <div id="TB"><span style="color:var(--muted);font-size:12px">Select a ticker to begin</span></div>
 <div id="CAREA" style="background:#080c10;">
+  <div class="zoom-bar">
+    <button class="zb" onclick="setZoom('1W')">1W</button>
+    <button class="zb" onclick="setZoom('1M')">1M</button>
+    <button class="zb" onclick="setZoom('3M')">3M</button>
+    <button class="zb" onclick="setZoom('6M')">6M</button>
+    <button class="zb active" onclick="setZoom('1Y')">1Y</button>
+  </div>
   <div style="position:relative;">
     <div id="legend">
       <span class="leg" style="color:#f5a623">&#9646; EMA9</span>
@@ -223,55 +244,159 @@ async function fetchD(sym){
 }
 
 // ── CANVAS DRAWING ────────────────────────────────────────
-function drawCandleChart(ctx,candles,e9a,e21a,e50a,sig,W,H,e200a){
+// ── CANDLESTICK PATTERN DETECTION ────────────────────────
+function detectPatterns(candles){
+  const patterns=[];
+  const N=candles.length;
+  for(let i=2;i<N;i++){
+    const c=candles[i],p=candles[i-1],pp=candles[i-2];
+    const body=Math.abs(c.c-c.o),range=c.h-c.l;
+    const upperWick=c.h-Math.max(c.o,c.c);
+    const lowerWick=Math.min(c.o,c.c)-c.l;
+    const bull=c.c>c.o;
+
+    // Hammer — small body, long lower wick, at potential support
+    if(lowerWick>body*2&&upperWick<body*.5&&range>0)
+      patterns.push({i,label:"HAMMER",col:"#00d084",yPos:"low"});
+
+    // Shooting star — small body, long upper wick
+    if(upperWick>body*2&&lowerWick<body*.5&&range>0)
+      patterns.push({i,label:"SHOOT★",col:"#ff4757",yPos:"high"});
+
+    // Bullish engulfing
+    if(p.c<p.o&&c.c>c.o&&c.c>p.o&&c.o<p.c&&body>Math.abs(p.c-p.o))
+      patterns.push({i,label:"ENGULF↑",col:"#00d084",yPos:"low"});
+
+    // Bearish engulfing
+    if(p.c>p.o&&c.c<c.o&&c.o>p.c&&c.c<p.o&&body>Math.abs(p.c-p.o))
+      patterns.push({i,label:"ENGULF↓",col:"#ff4757",yPos:"high"});
+
+    // Doji — open ≈ close
+    if(range>0&&body/range<0.1&&i>0)
+      patterns.push({i,label:"DOJI",col:"#f5a623",yPos:"high"});
+
+    // Morning star (3-candle bullish reversal)
+    if(i>=2&&pp.c<pp.o&&Math.abs(p.c-p.o)<Math.abs(pp.c-pp.o)*.3&&c.c>c.o&&c.c>pp.o)
+      patterns.push({i,label:"MSTAR↑",col:"#00d084",yPos:"low"});
+
+    // Inside bar (consolidation before potential breakout)
+    if(c.h<p.h&&c.l>p.l)
+      patterns.push({i,label:"INSIDE",col:"#4fc3f7",yPos:"high"});
+  }
+  // Deduplicate — only keep last pattern per candle
+  const seen={};
+  return patterns.filter(p=>{if(seen[p.i])return false;seen[p.i]=true;return true;});
+}
+
+// ── FULL FEATURED CANDLE CHART ────────────────────────────
+function drawCandleChart(ctx,candles,e9a,e21a,e50a,sig,W,H,e200a,extras){
+  extras=extras||{};
+  const {support,resist,earningsIdx}=extras;
+
   ctx.clearRect(0,0,W,H);
-  const LPAD=55,RPAD=12,TPAD=15,BPAD=25;
-  const cw=W-LPAD-RPAD,ch=H-TPAD-BPAD;
+  const LPAD=55,RPAD=12,TPAD=15,BPAD=25,VOLH=45;
+  const cw=W-LPAD-RPAD;
+  // Price area takes top portion, volume bars at bottom
+  const priceH=H-TPAD-BPAD-VOLH-4;
+  const volTop=TPAD+priceH+4;
   const N=candles.length;
   if(!N)return;
 
-  // Price range
+  // ── Price range ────────────────────────────────────────
   let lo=Infinity,hi=-Infinity;
   candles.forEach(c=>{lo=Math.min(lo,c.l);hi=Math.max(hi,c.h);});
-  [e9a,e21a,e50a].forEach(arr=>arr.forEach(v=>{if(v){lo=Math.min(lo,v);hi=Math.max(hi,v);}}));
-  if(sig){const vals=[sig.entry,sig.stop,sig.tp1,sig.tp2].filter(Boolean);vals.forEach(v=>{lo=Math.min(lo,v);hi=Math.max(hi,v);});}
+  [e9a,e21a,e50a].forEach(arr=>arr&&arr.forEach(v=>{if(v){lo=Math.min(lo,v);hi=Math.max(hi,v);}}));
+  if(sig){[sig.entry,sig.stop,sig.tp1,sig.tp2].filter(Boolean).forEach(v=>{lo=Math.min(lo,v);hi=Math.max(hi,v);});}
+  if(support)lo=Math.min(lo,support);
+  if(resist) hi=Math.max(hi,resist);
   const range=hi-lo||1;
   lo-=range*.05;hi+=range*.05;
 
   const xOf=i=>LPAD+i*(cw/N)+cw/(N*2);
-  const yOf=v=>TPAD+((hi-v)/(hi-lo))*ch;
+  const yOf=v=>TPAD+((hi-v)/(hi-lo))*priceH;
   const bw=Math.max(Math.floor(cw/N)-2,1);
 
-  // Grid lines
+  // ── H: Support/Resistance zones ───────────────────────
+  if(support&&support>lo){
+    ctx.fillStyle="rgba(0,208,132,0.06)";
+    const sy=yOf(support),sh=Math.max(yOf(support*0.99)-sy,4);
+    ctx.fillRect(LPAD,sy,cw,sh);
+    ctx.strokeStyle="rgba(0,208,132,0.3)";ctx.lineWidth=1;ctx.setLineDash([3,3]);
+    ctx.beginPath();ctx.moveTo(LPAD,sy);ctx.lineTo(W-RPAD,sy);ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle="rgba(0,208,132,0.7)";ctx.font="8px Space Mono,monospace";ctx.textAlign="left";
+    ctx.fillText("SUP $"+support.toFixed(2),LPAD+3,sy-2);
+  }
+  if(resist&&resist<hi){
+    ctx.fillStyle="rgba(255,71,87,0.06)";
+    const ry=yOf(resist*1.01),rh=yOf(resist)-ry;
+    ctx.fillRect(LPAD,ry,cw,Math.max(rh,4));
+    ctx.strokeStyle="rgba(255,71,87,0.3)";ctx.lineWidth=1;ctx.setLineDash([3,3]);
+    ctx.beginPath();ctx.moveTo(LPAD,yOf(resist));ctx.lineTo(W-RPAD,yOf(resist));ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle="rgba(255,71,87,0.7)";ctx.font="8px Space Mono,monospace";ctx.textAlign="left";
+    ctx.fillText("RES $"+resist.toFixed(2),LPAD+3,yOf(resist)-2);
+  }
+
+  // ── Grid lines ────────────────────────────────────────
   ctx.strokeStyle="#0d1219";ctx.lineWidth=1;
   for(let p=0;p<=4;p++){
-    const y=TPAD+p*(ch/4);
+    const y=TPAD+p*(priceH/4);
     ctx.beginPath();ctx.moveTo(LPAD,y);ctx.lineTo(W-RPAD,y);ctx.stroke();
     const v=hi-p*(hi-lo)/4;
     ctx.fillStyle="#5a6a7a";ctx.font="9px Space Mono,monospace";ctx.textAlign="right";
     ctx.fillText("$"+v.toFixed(2),LPAD-4,y+3);
   }
 
-  // Candles
+  // ── G: Earnings vertical line ─────────────────────────
+  if(earningsIdx!=null&&earningsIdx>=0&&earningsIdx<N){
+    const ex=xOf(earningsIdx);
+    ctx.strokeStyle="rgba(245,166,35,0.5)";ctx.lineWidth=1;ctx.setLineDash([4,3]);
+    ctx.beginPath();ctx.moveTo(ex,TPAD);ctx.lineTo(ex,TPAD+priceH);ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle="rgba(245,166,35,0.9)";ctx.font="bold 8px Space Mono,monospace";ctx.textAlign="center";
+    ctx.fillText("EARN",ex,TPAD+10);
+  }
+
+  // ── B: Volume bars ────────────────────────────────────
+  const vols=candles.map(c=>c.v||0);
+  const maxVol=Math.max(...vols)||1;
+  const avgVol=vols.reduce((a,b)=>a+b,0)/vols.length;
+  candles.forEach((c,i)=>{
+    const vx=xOf(i),vRatio=c.v/maxVol;
+    const vBarH=Math.max(vRatio*VOLH,1);
+    const bull=c.c>=c.o;
+    // Colour: high volume = brighter, avg volume = dim
+    const bright=c.v>avgVol*1.3;
+    ctx.fillStyle=bull?(bright?"#00d08480":"#00d08430"):(bright?"#ff475780":"#ff475730");
+    ctx.fillRect(vx-bw/2,volTop+VOLH-vBarH,bw,vBarH);
+  });
+  // Avg vol line
+  const avgY=volTop+VOLH-(avgVol/maxVol)*VOLH;
+  ctx.strokeStyle="#5a6a7a40";ctx.lineWidth=1;ctx.setLineDash([3,2]);
+  ctx.beginPath();ctx.moveTo(LPAD,avgY);ctx.lineTo(W-RPAD,avgY);ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle="#5a6a7a";ctx.font="8px Space Mono,monospace";ctx.textAlign="left";
+  ctx.fillText("VOL",LPAD+2,volTop+8);
+
+  // ── Candles ───────────────────────────────────────────
   candles.forEach((c,i)=>{
     const x=xOf(i),yO=yOf(c.o),yC=yOf(c.c),yH=yOf(c.h),yL=yOf(c.l);
-    const bull=c.c>=c.o;
-    const col=bull?"#00d084":"#ff4757";
-    // Wick
+    const bull=c.c>=c.o,col=bull?"#00d084":"#ff4757";
     ctx.strokeStyle=bull?"#00d08480":"#ff475780";ctx.lineWidth=1;
     ctx.beginPath();ctx.moveTo(x,yH);ctx.lineTo(x,yL);ctx.stroke();
-    // Body
     ctx.fillStyle=col;
     const bodyY=Math.min(yO,yC),bodyH=Math.max(Math.abs(yC-yO),1);
     ctx.fillRect(x-bw/2,bodyY,bw,bodyH);
   });
 
-  // EMAs
+  // ── EMAs ──────────────────────────────────────────────
   function drawLine(arr,col,lw){
+    if(!arr)return;
     ctx.strokeStyle=col;ctx.lineWidth=lw;ctx.beginPath();
     let first=true;
     arr.forEach((v,i)=>{
-      if(v==null)return;
+      if(v==null||i>=N)return;
       const x=xOf(i),y=yOf(v);
       if(first){ctx.moveTo(x,y);first=false;}else ctx.lineTo(x,y);
     });
@@ -280,16 +405,17 @@ function drawCandleChart(ctx,candles,e9a,e21a,e50a,sig,W,H,e200a){
   drawLine(e9a,"#f5a623",1);
   drawLine(e21a,"#4fc3f7",1);
   drawLine(e50a,"#9c88ff",1.5);
+  drawLine(e200a,"#ff6b6b",1);
 
-  // Signal lines
+  // ── Signal lines ──────────────────────────────────────
   if(sig){
     function drawHLine(v,col,label){
       const y=yOf(v);
       ctx.strokeStyle=col;ctx.lineWidth=1;ctx.setLineDash([5,4]);
       ctx.beginPath();ctx.moveTo(LPAD,y);ctx.lineTo(W-RPAD,y);ctx.stroke();
       ctx.setLineDash([]);
-      ctx.fillStyle=col;ctx.font="bold 9px Space Mono,monospace";ctx.textAlign="left";
-      ctx.fillText(label+" $"+v.toFixed(2),LPAD+4,y-3);
+      ctx.fillStyle=col;ctx.font="bold 9px Space Mono,monospace";ctx.textAlign="right";
+      ctx.fillText(label+" $"+v.toFixed(2),W-RPAD-2,y-3);
     }
     drawHLine(sig.entry,"#4fc3f7cc","ENTRY");
     drawHLine(sig.stop, "#ff4757cc","STOP");
@@ -297,30 +423,43 @@ function drawCandleChart(ctx,candles,e9a,e21a,e50a,sig,W,H,e200a){
     if(sig.tp2)drawHLine(sig.tp2,"#00d08466","TP2");
   }
 
-  // EMA 200
-  if(e200a){
-    ctx.strokeStyle="#ff6b6b";ctx.lineWidth=1;ctx.beginPath();
-    let fe=true;
-    e200a.forEach((v,i)=>{
-      if(v==null||i>=N)return;
-      const x=xOf(i),y=yOf(v);
-      if(fe){ctx.moveTo(x,y);fe=false;}else ctx.lineTo(x,y);
+  // ── D: Candlestick pattern labels ─────────────────────
+  if(N>10){
+    const patterns=detectPatterns(candles);
+    ctx.font="bold 8px Space Mono,monospace";ctx.textAlign="center";
+    patterns.slice(-15).forEach(p=>{  // Only show recent 15 to avoid clutter
+      const x=xOf(p.i);
+      const c=candles[p.i];
+      let y;
+      if(p.yPos==="low")  y=yOf(c.l)+14;
+      else                y=yOf(c.h)-4;
+      // Triangle marker
+      ctx.fillStyle=p.col;
+      ctx.beginPath();
+      if(p.yPos==="low"){ctx.moveTo(x-3,y-8);ctx.lineTo(x+3,y-8);ctx.lineTo(x,y-4);}
+      else              {ctx.moveTo(x-3,y+4);ctx.lineTo(x+3,y+4);ctx.lineTo(x,y);}
+      ctx.fill();
+      // Label
+      ctx.fillStyle=p.col+"cc";
+      ctx.fillText(p.label,x,p.yPos==="low"?y+8:y-10);
     });
-    ctx.stroke();
   }
 
-  // X axis dates — show ~6 labels
+  // ── X axis dates ──────────────────────────────────────
   ctx.fillStyle="#5a6a7a";ctx.font="9px Space Mono,monospace";ctx.textAlign="center";
-  const step=Math.floor(N/6);
+  const step=Math.max(Math.floor(N/6),1);
   for(let i=step;i<N;i+=step){
     const d=new Date(candles[i].t*1000);
-    const lbl=(d.getMonth()+1)+"/"+d.getDate();
-    ctx.fillText(lbl,xOf(i),H-6);
+    ctx.fillText((d.getMonth()+1)+"/"+d.getDate(),xOf(i),H-6);
   }
 
-  // Border
+  // ── Border ────────────────────────────────────────────
   ctx.strokeStyle="#1e2a35";ctx.lineWidth=1;ctx.setLineDash([]);
-  ctx.strokeRect(LPAD,TPAD,cw,ch);
+  ctx.strokeRect(LPAD,TPAD,cw,priceH);
+  ctx.strokeRect(LPAD,volTop,cw,VOLH);
+
+  // Store chart mapping for hover tooltip
+  window._chartMap={xOf,yOf,candles,LPAD,W:W-RPAD,TPAD,priceH,volTop,VOLH,N,cw};
 }
 
 function drawRSIChart(ctx,candles,rsi14,W,H){
@@ -369,8 +508,143 @@ function drawAll(data,sig){
   const {cw,ch}=layout();
   const cv=document.getElementById("CV"),rv=document.getElementById("RV");
   const ctx1=cv.getContext("2d"),ctx2=rv.getContext("2d");
-  drawCandleChart(ctx1,data.candles,data.e9a,data.e21a,data.e50a,sig,cw,ch,data.e200a);
-  drawRSIChart(ctx2,data.candles,data.rsi14,cw,RSI_H);
+  // Apply zoom filter to all arrays
+  const allC=data.candles;
+  const zoomed=applyZoom(allC);
+  const zStart=allC.length-zoomed.length;
+  const slice=arr=>arr?arr.slice(zStart):arr;
+  drawCandleChart(ctx1,zoomed,slice(data.e9a),slice(data.e21a),slice(data.e50a),sig,cw,ch,slice(data.e200a),LAST_EXTRAS);
+  drawRSIChart(ctx2,zoomed,slice(data.rsi14),cw,RSI_H);
+}
+
+// ── STATE ─────────────────────────────────────────────────
+let ZOOM='1Y';
+let SIGNAL_TS=null;    // Timestamp when current signal was generated
+let LAST_EXTRAS={};    // Extra data for chart (S/R, earnings)
+
+// ── ZOOM ──────────────────────────────────────────────────
+function setZoom(z){
+  ZOOM=z;
+  document.querySelectorAll('.zb').forEach(b=>b.classList.toggle('active',b.textContent===z));
+  if(LAST_DATA)drawAll(LAST_DATA,LAST_SIG);
+}
+
+function applyZoom(candles){
+  const now=Date.now()/1000;
+  const cutoffs={'1W':7,'1M':30,'3M':90,'6M':182,'1Y':365};
+  const days=cutoffs[ZOOM]||365;
+  const cutoff=now-days*86400;
+  const filtered=candles.filter(c=>c.t>=cutoff);
+  return filtered.length>5?filtered:candles.slice(-Math.min(candles.length,20));
+}
+
+// ── F: CORRELATION WARNING ─────────────────────────────────
+// Pre-calculated correlation groups — tickers that move together
+const CORR_GROUPS=[
+  {label:"Semiconductors",tickers:["NVDA","AMD","MU","LRCX","AMAT","AVGO","KLAC","TXN"],threshold:0.75},
+  {label:"Big Tech",tickers:["AAPL","MSFT","GOOGL","META","ANET"],threshold:0.7},
+  {label:"Cloud/Software",tickers:["CRM","NOW","SNOW","PANW","CRWD","ADBE","ORCL"],threshold:0.72},
+  {label:"Biotech",tickers:["AMGN","GILD","REGN","VRTX","ABBV"],threshold:0.65},
+  {label:"Energy",tickers:["XOM","CVX","COP","EOG"],threshold:0.8},
+  {label:"TSX Energy",tickers:["CNQ.TO","SU.TO"],threshold:0.85},
+  {label:"TSX Transport",tickers:["CNR.TO","CP.TO","TFII.TO"],threshold:0.75},
+];
+
+function checkCorrelationWarning(sym){
+  for(const g of CORR_GROUPS){
+    if(g.tickers.includes(sym)){
+      // Check if any ticker from this group is in open signals
+      const openSignals=JSON.parse(localStorage.getItem('openSignals')||'[]');
+      const conflicts=openSignals.filter(s=>s!==sym&&g.tickers.includes(s));
+      if(conflicts.length>0){
+        return{warn:true,group:g.label,conflicts,msg:`⚠️ CORRELATION RISK — You may already have a signal on ${conflicts.join(', ')} (${g.label} group, ~${Math.round(g.threshold*100)}% correlated). Taking both is effectively doubling the same bet.`};
+      }
+    }
+  }
+  return{warn:false};
+}
+
+function trackSignal(sym){
+  const signals=JSON.parse(localStorage.getItem('openSignals')||'[]');
+  if(!signals.includes(sym))signals.push(sym);
+  localStorage.setItem('openSignals',JSON.stringify(signals.slice(-10)));
+}
+
+// ── E: SIGNAL CONFIDENCE DECAY ────────────────────────────
+function getSignalAge(signalTs){
+  if(!signalTs)return null;
+  const days=Math.floor((Date.now()/1000-signalTs)/86400);
+  return days;
+}
+
+function renderSignalAgeWarning(ageDays){
+  if(ageDays===null||ageDays<1)return'';
+  if(ageDays>=5)
+    return`<div class="age-warn">⛔ SIGNAL ${ageDays} DAYS OLD — setup likely invalidated. Re-analyse before entry.</div>`;
+  if(ageDays>=3)
+    return`<div class="age-warn">⚠️ SIGNAL ${ageDays} DAYS OLD — confidence reduced. Verify price structure still intact.</div>`;
+  if(ageDays>=2)
+    return`<div class="age-warn">⚠️ SIGNAL ${ageDays} DAYS OLD — check if entry level still valid.</div>`;
+  return`<div style="font-size:10px;color:var(--green);margin-bottom:6px">✅ Signal is fresh (${ageDays} day old)</div>`;
+}
+
+// ── I: SIDEBAR WATCHLIST SUMMARY ──────────────────────────
+function updateSidebarSummary(signals,total,regime){
+  const sumEl=document.getElementById('SB_SUMMARY');
+  const sigEl=document.getElementById('SB_SIGNALS');
+  const regEl=document.getElementById('SB_REGIME_S');
+  if(!sumEl)return;
+  sumEl.style.display='block';
+  if(sigEl)sigEl.textContent=signals;
+  if(regEl){
+    const col=regime==='BULL'?'var(--green)':regime==='BEAR'?'var(--red)':'var(--amber)';
+    regEl.innerHTML=`<span style="color:${col}">${regime}</span>`;
+  }
+}
+
+// ── C: HOVER TOOLTIP ──────────────────────────────────────
+function initTooltip(){
+  const cv=document.getElementById('CV');
+  if(!cv)return;
+  const tip=document.getElementById('TOOLTIP');
+
+  cv.addEventListener('mousemove',e=>{
+    const m=window._chartMap;
+    if(!m||!m.candles.length){tip.style.display='none';return;}
+
+    const rect=cv.getBoundingClientRect();
+    const mx=e.clientX-rect.left,my=e.clientY-rect.top;
+    if(mx<m.LPAD||mx>m.W||my<m.TPAD||my>m.TPAD+m.priceH+m.VOLH+4){tip.style.display='none';return;}
+
+    // Find nearest candle
+    const idxF=(mx-m.LPAD)/(m.cw/m.N)-0.5;
+    const idx=Math.max(0,Math.min(m.N-1,Math.round(idxF)));
+    const c=m.candles[idx];
+    if(!c){tip.style.display='none';return;}
+
+    const d=new Date(c.t*1000);
+    const dateStr=d.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
+    const bull=c.c>=c.o;
+    const chg=c.c-c.o,chgP=(chg/c.o*100).toFixed(2);
+    const col=bull?'#00d084':'#ff4757';
+
+    tip.innerHTML=`
+      <div style="font-weight:700;color:var(--amber);margin-bottom:4px">${dateStr}</div>
+      <div style="color:var(--muted)">O: <span style="color:var(--text)">$${c.o}</span></div>
+      <div style="color:var(--muted)">H: <span style="color:#00d084">$${c.h}</span></div>
+      <div style="color:var(--muted)">L: <span style="color:#ff4757">$${c.l}</span></div>
+      <div style="color:var(--muted)">C: <span style="color:${col};font-weight:700">$${c.c}</span></div>
+      <div style="color:${col};margin-top:2px">${bull?'+':''}${chg.toFixed(2)} (${bull?'+':''}${chgP}%)</div>
+      ${c.v?`<div style="color:var(--muted);margin-top:2px">Vol: <span style="color:var(--text)">${(c.v/1e6).toFixed(1)}M</span></div>`:''}`;
+    tip.style.display='block';
+    // Position tooltip — keep it on screen
+    const tx=e.clientX+14,ty=e.clientY-10;
+    const tw=160,th=130;
+    tip.style.left=(tx+tw>window.innerWidth?tx-tw-20:tx)+'px';
+    tip.style.top=(ty+th>window.innerHeight?ty-th:ty)+'px';
+  });
+
+  cv.addEventListener('mouseleave',()=>{if(tip)tip.style.display='none';});
 }
 
 // ── SIGNAL ESTIMATE ───────────────────────────────────────
@@ -1025,8 +1299,7 @@ async function go(sym){
         <div class="note" style="margin-top:5px">All 4 signals confirmed &mdash; run Claude for full analysis</div>`;
     }
 
-    LAST_DATA={candles,e9a,e21a,e50a,rsi14,e200a,atrArr};LAST_SIG=sig;
-    drawAll(LAST_DATA,LAST_SIG);
+    // LAST_DATA set below with extras
 
     // ── Performance Intelligence ─────────────────────────
     const perfSection=document.getElementById("PERF");
@@ -1092,7 +1365,43 @@ async function go(sym){
       });
     }
 
+    // Build extras for chart (S/R zones, earnings)
+    const lows50=candles.slice(-50).map(c=>c.l).sort((a,b)=>a-b);
+    const highs50=candles.slice(-50).map(c=>c.h).sort((a,b)=>b-a);
+    const chartSupport=lows50[Math.floor(lows50.length*.1)];
+    const chartResist=highs50[Math.floor(highs50.length*.1)];
+
+    // Find earnings candle index (approximate — flag last high-volume spike)
+    let earningsIdx=null;
+    const avgVE=candles.reduce((a,c)=>a+c.v,0)/candles.length;
+    for(let i=candles.length-30;i<candles.length-2;i++){
+      if(candles[i].v>avgVE*4&&Math.abs(candles[i].c-candles[i].o)/candles[i].o>0.03){earningsIdx=i;break;}
+    }
+
+    LAST_EXTRAS={support:chartSupport,resist:chartResist,earningsIdx};
+    LAST_DATA={candles,e9a,e21a,e50a,rsi14,e200a,atrArr};LAST_SIG=sig;
+    drawAll(LAST_DATA,LAST_SIG);
+
+    // E: Signal confidence decay
+    SIGNAL_TS=sig?Date.now()/1000:SIGNAL_TS;
+    const ageDays=getSignalAge(SIGNAL_TS);
+    const ageHtml=sig?renderSignalAgeWarning(0):renderSignalAgeWarning(ageDays);
+
+    // F: Correlation warning
+    const corrResult=checkCorrelationWarning(sym);
+    const corrHtml=corrResult.warn?`<div class="corr-warn">${corrResult.msg}</div>`:'';
+    if(sig)trackSignal(sym);
+
+    // Prepend age + corr warnings to signal panel
+    const pgEl=document.getElementById("PG");
+    if(pgEl&&(ageHtml||corrHtml)){
+      pgEl.innerHTML=(ageHtml+corrHtml)+pgEl.innerHTML;
+    }
+
     document.getElementById("AB").disabled=false;document.getElementById("AB").textContent="&#9889; RUN CLAUDE ANALYSIS";
+    // Show export button only when valid signal exists
+    const expBtn=document.getElementById("EXPBTN");
+    if(expBtn)expBtn.style.display=sig?"":"none";
     // Auto-calculate position size if account already set
     setTimeout(calcPositionSize, 100);
 
@@ -1193,10 +1502,11 @@ async function scanAll(){
   scanRunning=false;
   btn.textContent="&#9654; SCAN ALL";btn.disabled=false;
 
+  updateSidebarSummary(qualified.length, Object.values(WL).flat().length, regimeCache?.combined||'—');
+
   if(qualified.length===0){
     alert("No tickers meet all 4 criteria today. Market may be weak or overbought.");
   } else {
-    // Auto-load the highest probability qualifying ticker
     const best=qualified.sort((a,b)=>b.sig.prob-a.sig.prob)[0];
     alert(`Scan complete! ${qualified.length} ticker(s) qualify:\n${qualified.map(q=>q.sym+" ("+q.sig.prob+"%)").join(", ")}\n\nLoading best: ${best.sym}`);
     go(best.sym);
@@ -1366,6 +1676,54 @@ SUMMARY: [3-4 sentences. Professional final assessment integrating both technica
   finally{btn.disabled=false;btn.textContent="&#9889; RUN CLAUDE ANALYSIS";}
 }
 
+// ── J: EXPORT SIGNAL ──────────────────────────────────────
+function exportSignal(){
+  if(!TICKER||!LAST_SIG)return;
+  const s=LAST_SIG;
+  const cur=TICKER.endsWith('.TO')?'CAD':'USD';
+  const cs=cur==='CAD'?'CA$':'$';
+  const d=new Date().toLocaleDateString('en-US',{weekday:'long',year:'numeric',month:'long',day:'numeric'});
+  const claude=document.getElementById('AO')?.innerText||'Run Claude Analysis for full audit.';
+  const txt=[
+    '═══════════════════════════════════════════',
+    `HALAL TRADER — SIGNAL EXPORT`,
+    d,
+    '═══════════════════════════════════════════',
+    `Ticker:       ${TICKER}`,
+    `Direction:    ${s.dir}`,
+    `Entry:        ${cs}${s.entry}`,
+    `Stop Loss:    ${cs}${s.stop}`,
+    `Take Profit 1:${cs}${s.tp1}`,
+    `Take Profit 2:${cs}${s.tp2}`,
+    `Risk/Reward:  1 : ${s.rr}`,
+    `Probability:  ${s.prob}%`,
+    `ATR (14d):    ${cs}${s.atr}`,
+    '───────────────────────────────────────────',
+    `Signal Criteria (${s.score}/4):`,
+    `  EMA Alignment:    ${s.signals?.emaAlign?'PASS':'FAIL'}`,
+    `  Above EMA 50:     ${s.signals?.aboveEma50?'PASS':'FAIL'}`,
+    `  RSI Momentum:     ${s.signals?.rsiMomentum?'PASS':'FAIL'}`,
+    `  Bullish Candle:   ${s.signals?.bullCandle?'PASS':'FAIL'}`,
+    `  Above EMA 200:    ${s.signals?.above200?'PASS':'FAIL'}`,
+    `  Near Support:     ${s.signals?.nearSupport?'PASS':'FAIL'}`,
+    '───────────────────────────────────────────',
+    'CLAUDE ANALYSIS:',
+    claude,
+    '═══════════════════════════════════════════',
+    '⚠️ Not financial advice. Always do your own research.',
+  ].join('\n');
+
+  // Copy to clipboard
+  navigator.clipboard.writeText(txt).then(()=>{
+    const btn=document.getElementById('EXPBTN');
+    if(btn){btn.textContent='✓ COPIED';setTimeout(()=>btn.textContent='⇑ EXPORT',2000);}
+  }).catch(()=>{
+    // Fallback — open in new window
+    const w=window.open('','_blank');
+    if(w){w.document.write('<pre style="font-family:monospace;padding:20px;">'+txt+'</pre>');w.document.close();}
+  });
+}
+
 // ── MODAL ─────────────────────────────────────────────────
 function openM(){document.getElementById("AK").value=localStorage.getItem("apiKey")||"";document.getElementById("MB").classList.add("show");}
 function closeM(){document.getElementById("MB").classList.remove("show");}
@@ -1389,9 +1747,12 @@ window.onload=function(){
   const mreg=document.getElementById("MREG");
   if(mreg)mreg.innerHTML='<span class="lbl">Detecting regime...</span>';
 
+  initTooltip();
+
   detectMarketRegime().then(regime=>{
     renderRegimeBar(regime);
     renderRegimePanel(regime);
+    updateSidebarSummary(0,Object.values(WL).flat().length,regime.combined||'—');
     setTimeout(()=>go("NVDA"),200);
   }).catch(()=>{
     setTimeout(()=>go("NVDA"),200);
