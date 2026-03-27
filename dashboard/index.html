@@ -634,6 +634,98 @@ function patternStats(matches){
   return{winRate:Math.round(wins/closed.length*100),total:closed.length,wins,losses:closed.length-wins,recentWins:recent.filter(m=>m.outcome==="WIN").length,recentTotal:recent.length};
 }
 
+// ── RSI DIVERGENCE DETECTION (Fix #5) ────────────────────
+function detectRSIDivergence(candles, rsi14, lookback=20){
+  if(candles.length < lookback+5 || rsi14.length < lookback+5)
+    return{type:"NONE",strength:"NONE",desc:"Insufficient data"};
+
+  const recent   = candles.slice(-lookback);
+  const rsiRecent= rsi14.slice(-lookback);
+  const prices   = recent.map(c=>c.c);
+
+  // Find swing highs and lows (simple local extrema)
+  function swings(arr, type, w=3){
+    const out=[];
+    for(let i=w;i<arr.length-w;i++){
+      const slice=arr.slice(i-w,i+w+1);
+      const val=arr[i];
+      if(type==="high" && val===Math.max(...slice)) out.push({i,v:val});
+      if(type==="low"  && val===Math.min(...slice)) out.push({i,v:val});
+    }
+    return out;
+  }
+
+  const pH = swings(prices,   "high");
+  const pL = swings(prices,   "low");
+  const rH = swings(rsiRecent,"high");
+  const rL = swings(rsiRecent,"low");
+
+  // Bearish: price higher high + RSI lower high
+  if(pH.length>=2 && rH.length>=2){
+    const ph1=pH[pH.length-2].v, ph2=pH[pH.length-1].v;
+    const rh1=rH[rH.length-2].v, rh2=rH[rH.length-1].v;
+    if(ph2>ph1 && rh2<rh1){
+      const diff=rh1-rh2;
+      const strength=diff>8?"STRONG":"MODERATE";
+      return{
+        type:"BEARISH", strength,
+        desc:`Price: ${ph1.toFixed(2)}→${ph2.toFixed(2)} (higher high) | RSI: ${rh1.toFixed(1)}→${rh2.toFixed(1)} (lower high)`,
+        probAdj: strength==="STRONG"? -20 : -10,
+        block: strength==="STRONG"
+      };
+    }
+  }
+
+  // Bullish: price lower low + RSI higher low
+  if(pL.length>=2 && rL.length>=2){
+    const pl1=pL[pL.length-2].v, pl2=pL[pL.length-1].v;
+    const rl1=rL[rL.length-2].v, rl2=rL[rL.length-1].v;
+    if(pl2<pl1 && rl2>rl1){
+      const diff=rl2-rl1;
+      const strength=diff>8?"STRONG":"MODERATE";
+      return{
+        type:"BULLISH", strength,
+        desc:`Price: ${pl1.toFixed(2)}→${pl2.toFixed(2)} (lower low) | RSI: ${rl1.toFixed(1)}→${rl2.toFixed(1)} (higher low)`,
+        probAdj: strength==="STRONG"? +10 : +5,
+        block: false
+      };
+    }
+  }
+
+  return{type:"NONE",strength:"NONE",desc:"Price and RSI aligned — no divergence",probAdj:0,block:false};
+}
+
+// ── SIGNAL FRESHNESS (Fix #2) ──────────────────────────────
+// Check if the daily close signal is still valid given today's opening range
+// Uses the last candle vs the day's open price from real-time data
+function checkSignalFreshness(candles, currentPrice){
+  if(!candles.length) return{fresh:true,desc:"No data",pctMove:0};
+  const lastClose = candles[candles.length-1].c;
+  if(!currentPrice || !lastClose) return{fresh:true,desc:"Price unavailable",pctMove:0};
+  const pctMove = ((currentPrice - lastClose) / lastClose * 100);
+  const absPct  = Math.abs(pctMove);
+  // Signal stale if price has moved more than 2% from close
+  if(absPct > 3){
+    return{
+      fresh:false, stale:true,
+      pctMove:+pctMove.toFixed(2),
+      desc:`⛔ SIGNAL INVALIDATED — gapped ${pctMove>0?"+":""}${pctMove.toFixed(2)}% from close ($${lastClose} → $${currentPrice.toFixed(2)}). Do not enter.`
+    };
+  } else if(absPct > 2){
+    return{
+      fresh:false, stale:false,
+      pctMove:+pctMove.toFixed(2),
+      desc:`⚠️ STALE — moved ${pctMove>0?"+":""}${pctMove.toFixed(2)}% from close. Adjust entry to $${currentPrice.toFixed(2)} and recalculate R:R.`
+    };
+  } else {
+    return{
+      fresh:true,
+      pctMove:+pctMove.toFixed(2),
+      desc:`✅ FRESH — price within 2% of close (${pctMove>0?"+":""}${pctMove.toFixed(2)}%)`
+    };
+  }
+}
+
 // ── BEST ENTRY TIMING ─────────────────────────────────────
 function bestEntryTiming(candles){
   const dayR={0:[],1:[],2:[],3:[],4:[]};
@@ -731,9 +823,32 @@ async function go(sym){
     const e9v=e9a[n],e21v=e21a[n],e50v=e50a[n],rsiV=rsi14[n];
     const al=e9v>e21v&&e21v>e50v?"BULLISH":e9v<e21v&&e21v<e50v?"BEARISH":"MIXED";
     const ac=al==="BULLISH"?"up":al==="BEARISH"?"dn":"wn";
-    document.getElementById("PT").innerHTML=`<div class="row"><span class="lbl">RSI (14)</span><span class="val ${rsiV<30?"up":rsiV>70?"dn":""}">${rsiV}</span></div><div class="row"><span class="lbl">EMA 9</span><span class="val">${e9v}</span></div><div class="row"><span class="lbl">EMA 21</span><span class="val">${e21v}</span></div><div class="row"><span class="lbl">EMA 50</span><span class="val">${e50v}</span></div><div class="row"><span class="lbl">EMA Align</span><span class="val ${ac}">${al}</span></div><div class="row"><span class="lbl">vs EMA 50</span><span class="val ${price>e50v?"up":"dn"}">${price>e50v?"ABOVE":"BELOW"}</span></div><div class="row"><span class="lbl">Vol vs Avg</span><span class="val ${volR>=100?"up":"wn"}">${volR}%</span></div>`;
+    document.getElementById("PT").innerHTML=`<div class="row"><span class="lbl">RSI (14)</span><span class="val ${rsiV<30?"up":rsiV>70?"dn":""}">${rsiV}</span></div><div class="row"><span class="lbl">EMA 9</span><span class="val">${e9v}</span></div><div class="row"><span class="lbl">EMA 21</span><span class="val">${e21v}</span></div><div class="row"><span class="lbl">EMA 50</span><span class="val">${e50v}</span></div><div class="row"><span class="lbl">EMA Align</span><span class="val ${e9v>e21v&&e21v>e50v?"up":e9v<e21v&&e21v<e50v?"dn":"wn"}">${e9v>e21v&&e21v>e50v?"BULLISH":e9v<e21v&&e21v<e50v?"BEARISH":"MIXED"}</span></div><div class="row"><span class="lbl">vs EMA 50</span><span class="val ${price>e50v?"up":"dn"}">${price>e50v?"ABOVE":"BELOW"}</span></div><div class="row"><span class="lbl">Vol vs Avg</span><span class="val ${volR>=100?"up":"wn"}">${volR}%</span></div><div style="border-top:1px solid var(--border);margin:5px 0;padding-top:5px"><div class="row"><span class="lbl">RSI Divergence</span><span class="val ${divResult.type==="BEARISH"?"dn":divResult.type==="BULLISH"?"up":""}">${divResult.type==="NONE"?"NONE":divResult.type+" ("+divResult.strength+")"}</span></div><div class="row"><span class="lbl">Signal Fresh</span><span class="val ${freshnessResult.fresh?"up":freshnessResult.stale?"dn":"wn"}">${freshnessResult.fresh?"FRESH ✓":freshnessResult.stale?"STALE ✗":"ADJUSTED"}</span></div><div class="row"><span class="lbl">Price move</span><span class="val ${freshnessResult.pctMove>=0?"up":"dn"}">${freshnessResult.pctMove>=0?"+":""}${freshnessResult.pctMove}%</span></div></div>`;
 
     const sig=estSig(price,e9v,e21v,e50v,rsiV,candles,e200v,atrVal);
+
+    // Fix #5 — RSI divergence check
+    const divResult = detectRSIDivergence(candles, rsi14, 25);
+
+    // Fix #2 — Signal freshness (compare close vs real-time price)
+    const freshnessResult = checkSignalFreshness(candles, price);
+    // Fix #2 — Freshness banner
+    const freshnessHtml = !freshnessResult.fresh ?
+      `<div style="background:${freshnessResult.stale?"rgba(255,71,87,.12)":"rgba(245,166,35,.12)"};border:1px solid ${freshnessResult.stale?"rgba(255,71,87,.3)":"rgba(245,166,35,.3)"};border-radius:5px;padding:7px 9px;margin-bottom:8px;font-size:10px;color:${freshnessResult.stale?"var(--red)":"var(--amber)"};">
+        ${freshnessResult.desc}
+      </div>` : "";
+
+    // Fix #5 — Divergence banner
+    const divColor  = divResult.type==="BEARISH"?"var(--red)":divResult.type==="BULLISH"?"var(--green)":"var(--muted)";
+    const divBg     = divResult.type==="BEARISH"?"rgba(255,71,87,.12)":divResult.type==="BULLISH"?"rgba(0,208,132,.12)":"transparent";
+    const divBorder = divResult.type==="BEARISH"?"rgba(255,71,87,.3)":divResult.type==="BULLISH"?"rgba(0,208,132,.3)":"transparent";
+    const divHtml   = divResult.type!=="NONE" ?
+      `<div style="background:${divBg};border:1px solid ${divBorder};border-radius:5px;padding:7px 9px;margin-bottom:8px;font-size:10px;color:${divColor};">
+        ${divResult.type==="BEARISH"?"⚠️":"✅"} RSI DIVERGENCE — ${divResult.type} (${divResult.strength})<br>
+        <span style="color:var(--muted)">${divResult.desc}</span>
+        ${divResult.block?"<br><strong>STRONG BEARISH DIVERGENCE — signal blocked regardless of criteria</strong>":""}
+      </div>` : "";
+
     // Regime gate — warn if bear market
     const regime = regimeCache;
     const regimeWarning = regime?.gateSignals
@@ -742,12 +857,14 @@ async function go(sym){
            <span style="color:var(--muted)">Both SPY and TSX are in confirmed downtrends. Wait for regime shift before taking long trades.</span>
          </div>` : "";
 
-    if(!sig || regime?.gateSignals){
+    // Block if strong bearish divergence or price invalidated
+    const blocked = regime?.gateSignals || divResult.block || freshnessResult.stale;
+    if(!sig || blocked){
       const e9v2=e9a[n],e21v2=e21a[n],e50v2=e50a[n],rsiV2=rsi14[n];
       const s1=e9v2>e21v2&&e21v2>e50v2,s2=price>e50v2,s3=rsiV2>45&&rsiV2<70,s4=candles[n].c>candles[n].o;
       const passed=[s1,s2,s3,s4].filter(Boolean).length;
       const tick=(v)=>v?'<span style="color:#00d084">&#10003;</span>':'<span style="color:#ff4757">&#10007;</span>';
-      document.getElementById("PG").innerHTML=regimeWarning+`
+      document.getElementById("PG").innerHTML=freshnessHtml+divHtml+regimeWarning+`
         <div style="color:var(--muted);font-size:10px;margin-bottom:8px">No qualifying LONG signal &mdash; ${passed}/4 criteria met</div>
         <div style="background:#0d1219;border-radius:6px;padding:8px;font-size:10px;line-height:1.9;">
           ${tick(s1)} EMA alignment (9&gt;21&gt;50)<br>
@@ -761,9 +878,10 @@ async function go(sym){
     else{
       const chk=sig.signals||{};
       const tick=(v)=>v?'<span style="color:#00d084">&#10003;</span>':'<span style="color:#ff4757">&#10007;</span>';
-      document.getElementById("PG").innerHTML=`
+      const adjProb = Math.min(Math.max((sig.prob||70)+(divResult.probAdj||0),40),92);
+      document.getElementById("PG").innerHTML=freshnessHtml+divHtml+`
         <div class="sdir">
-          <span class="sdl long">&uarr; LONG &mdash; ${sig.prob}% probability</span>
+          <span class="sdl long">&uarr; LONG &mdash; ${adjProb}% probability${divResult.probAdj?` (${divResult.probAdj>0?"+":""}${divResult.probAdj}% divergence adj)`:""}</span>
         </div>
         <div style="background:#0d1219;border-radius:6px;padding:8px;margin-bottom:10px;font-size:10px;line-height:1.9;">
           ${tick(chk.emaAlign)} EMA 9 &gt; 21 &gt; 50 (bullish alignment)<br>
