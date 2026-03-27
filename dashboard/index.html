@@ -106,6 +106,7 @@ canvas{display:block;}
   </div>
 </aside>
 <div id="TB"><span style="color:var(--muted);font-size:12px">Select a ticker to begin</span></div>
+<div id="RT_DOT" style="position:fixed;top:65px;right:235px;width:7px;height:7px;border-radius:50%;background:var(--muted);z-index:20;transition:background .3s;" title="Real-time update indicator"></div>
 <div id="CAREA" style="background:#080c10;">
   <div class="zoom-bar">
     <button class="zb" onclick="setZoom('1W')">1W</button>
@@ -228,19 +229,67 @@ function ema(a,n){const k=2/(n+1);let v=a[0];return a.map((x,i)=>{if(!i)return+x
 function rsiCalc(a,n=14){let g=0,l=0;for(let i=1;i<=n;i++){const d=a[i]-a[i-1];d>=0?g+=d:l-=d;}let ag=g/n,al=l/n;const o=new Array(n).fill(null);o.push(+(100-100/(1+ag/(al||.001))).toFixed(1));for(let i=n+1;i<a.length;i++){const d=a[i]-a[i-1];ag=(ag*(n-1)+Math.max(d,0))/n;al=(al*(n-1)+Math.max(-d,0))/n;o.push(+(100-100/(1+ag/(al||.001))).toFixed(1));}return o;}
 
 // ── FETCH ─────────────────────────────────────────────────
-async function fetchD(sym){
-  const url=`https://query1.finance.yahoo.com/v8/finance/chart/${sym}?interval=1d&range=1y`;
-  for(const p of[`https://corsproxy.io/?${encodeURIComponent(url)}`,`https://api.allorigins.win/get?url=${encodeURIComponent(url)}`]){
+// ── #12 FALLBACK DATA SOURCE ─────────────────────────────
+// Tries Yahoo Finance via 3 different proxies, then falls back
+// to a direct fetch attempt. Tracks source for display.
+let lastDataSource = 'Yahoo Finance';
+
+async function fetchWithProxy(url, timeout=9000){
+  const proxies = [
+    u => `https://corsproxy.io/?${encodeURIComponent(u)}`,
+    u => `https://api.allorigins.win/get?url=${encodeURIComponent(u)}`,
+    u => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`,
+    u => u  // Direct attempt last
+  ];
+  for(const mkProxy of proxies){
     try{
-      const c=new AbortController(),t=setTimeout(()=>c.abort(),9000);
-      const r=await fetch(p,{signal:c.signal});clearTimeout(t);
-      if(!r.ok)continue;
-      const tx=await r.text();let raw;
-      try{const j=JSON.parse(tx);raw=j.contents?JSON.parse(j.contents):j;}catch{continue;}
-      if(raw?.chart?.result?.[0])return raw.chart.result[0];
-    }catch{continue;}
+      const proxyUrl = mkProxy(url);
+      const ctrl = new AbortController();
+      const tid  = setTimeout(()=>ctrl.abort(), timeout);
+      const r    = await fetch(proxyUrl, {signal:ctrl.signal});
+      clearTimeout(tid);
+      if(!r.ok) continue;
+      const tx = await r.text();
+      let raw;
+      try{ const j=JSON.parse(tx); raw=j.contents?JSON.parse(j.contents):j; }catch{ continue; }
+      if(raw) return raw;
+    }catch{ continue; }
   }
-  throw new Error("Data unavailable — try again");
+  return null;
+}
+
+async function fetchD(sym, range='1y'){
+  // Primary: Yahoo Finance chart API
+  const yahooUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${sym}?interval=1d&range=${range}`;
+  const yahooRaw = await fetchWithProxy(yahooUrl);
+  if(yahooRaw?.chart?.result?.[0]){
+    lastDataSource='Yahoo Finance';
+    return yahooRaw.chart.result[0];
+  }
+
+  // Fallback: Yahoo Finance v8 alternate endpoint
+  const altUrl = `https://query2.finance.yahoo.com/v8/finance/chart/${sym}?interval=1d&range=${range}&includePrePost=false`;
+  const altRaw = await fetchWithProxy(altUrl);
+  if(altRaw?.chart?.result?.[0]){
+    lastDataSource='Yahoo Finance (alt)';
+    return altRaw.chart.result[0];
+  }
+
+  throw new Error(`Data unavailable for ${sym} — all sources failed. Try again in a moment.`);
+}
+
+// Fetch real-time quote (price only — lightweight)
+async function fetchQuote(sym){
+  const url=`https://query1.finance.yahoo.com/v8/finance/chart/${sym}?interval=1m&range=1d`;
+  const raw=await fetchWithProxy(url, 6000);
+  if(!raw?.chart?.result?.[0]) return null;
+  const meta=raw.chart.result[0].meta;
+  return {
+    price:  meta.regularMarketPrice,
+    change: meta.regularMarketPrice-(meta.chartPreviousClose||meta.previousClose||meta.regularMarketPrice),
+    volume: meta.regularMarketVolume,
+    time:   new Date(meta.regularMarketTime*1000)
+  };
 }
 
 // ── CANVAS DRAWING ────────────────────────────────────────
@@ -406,6 +455,32 @@ function drawCandleChart(ctx,candles,e9a,e21a,e50a,sig,W,H,e200a,extras){
   drawLine(e21a,"#4fc3f7",1);
   drawLine(e50a,"#9c88ff",1.5);
   drawLine(e200a,"#ff6b6b",1);
+
+  // ── #8 Gap zones ─────────────────────────────────────
+  if(extras&&extras.gapData){
+    extras.gapData.gaps.slice(-8).forEach(g=>{
+      if(g.filled) return;
+      const ci=candles.findIndex(c=>c.t===extras.gapData.gaps[0]?.price);
+      // Find gap in zoomed candle array by matching approximately
+      const gIdx=candles.findIndex(c=>Math.abs(c.o-g.price)<g.price*0.005);
+      if(gIdx<1) return;
+      const prev=candles[gIdx-1];
+      if(!prev) return;
+      const isUp=g.type.includes('↑');
+      const y1=yOf(isUp?prev.h:prev.l);
+      const y2=yOf(isUp?candles[gIdx].o:candles[gIdx].o);
+      if(Math.abs(y2-y1)<1) return;
+      ctx.fillStyle=isUp?'rgba(0,208,132,0.06)':'rgba(255,71,87,0.06)';
+      ctx.fillRect(LPAD,Math.min(y1,y2),cw,Math.abs(y2-y1)+1);
+      ctx.strokeStyle=isUp?'rgba(0,208,132,0.25)':'rgba(255,71,87,0.25)';
+      ctx.lineWidth=1;ctx.setLineDash([2,3]);
+      ctx.beginPath();ctx.moveTo(LPAD,Math.min(y1,y2));ctx.lineTo(W-RPAD,Math.min(y1,y2));ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle=isUp?'rgba(0,208,132,0.7)':'rgba(255,71,87,0.7)';
+      ctx.font='8px Space Mono,monospace';ctx.textAlign='left';
+      ctx.fillText('GAP '+(isUp?'↑':'↓'),LPAD+3,Math.min(y1,y2)-2);
+    });
+  }
 
   // ── Signal lines ──────────────────────────────────────
   if(sig){
@@ -1135,6 +1210,141 @@ function bestEntryTiming(candles){
   return{bestDay:days[0],worstDay:days[days.length-1],bestPeriod:periods[0],allDays:days};
 }
 
+// ── #8 GAP DETECTION ─────────────────────────────────────
+function detectGaps(candles){
+  const gaps=[];
+  const N=candles.length;
+  if(N<3)return{gaps:[],latest:null,summary:"Insufficient data"};
+
+  for(let i=1;i<N;i++){
+    const prev=candles[i-1], curr=candles[i];
+    const gapUp   = curr.o > prev.h;   // Open above previous high
+    const gapDown = curr.o < prev.l;   // Open below previous low
+    if(!gapUp&&!gapDown) continue;
+
+    const gapPct  = ((curr.o - prev.c) / prev.c * 100);
+    const gapSize = Math.abs(gapPct);
+    if(gapSize < 0.3) continue;  // Ignore tiny gaps
+
+    // Classification
+    const avgVol50 = candles.slice(Math.max(0,i-50),i).reduce((a,c)=>a+c.v,0) /
+                     Math.min(50, i);
+    const highVol  = curr.v > avgVol50 * 1.5;
+
+    // Check if gap was filled within next 5 candles
+    let filled = false;
+    for(let j=i+1;j<Math.min(i+6,N);j++){
+      if(gapUp   && candles[j].l <= prev.h) { filled=true; break; }
+      if(gapDown && candles[j].h >= prev.l) { filled=true; break; }
+    }
+
+    let type, signal, col;
+    if(gapUp && highVol && !filled){
+      type='BREAKAWAY ↑'; signal='BULLISH'; col='#00d084';
+    } else if(gapUp && filled){
+      type='GAP FILL ↑'; signal='NEUTRAL'; col='#f5a623';
+    } else if(gapUp && !highVol){
+      type='COMMON ↑'; signal='WEAK'; col='#f5a62380';
+    } else if(gapDown && highVol){
+      type='BREAKAWAY ↓'; signal='BEARISH'; col='#ff4757';
+    } else if(gapDown && filled){
+      type='GAP FILL ↓'; signal='NEUTRAL'; col='#f5a623';
+    } else {
+      type='COMMON ↓'; signal='WEAK'; col='#ff475780';
+    }
+
+    gaps.push({i, type, signal, col, gapPct:+gapPct.toFixed(2),
+               gapSize:+gapSize.toFixed(2), filled, highVol,
+               date: new Date(curr.t*1000),
+               price: curr.o});
+  }
+
+  const latest = gaps.length ? gaps[gaps.length-1] : null;
+  const recentGaps = gaps.slice(-3);
+
+  // Summary for signal panel
+  let summary = 'No significant gaps in recent history';
+  if(latest){
+    const d = Math.floor((Date.now()/1000 - candles[latest.i].t) / 86400);
+    summary = `${latest.type} ${d===0?'today':d+'d ago'} (${latest.gapPct>=0?'+':''}${latest.gapPct}%)${latest.filled?' — FILLED':''}`;
+  }
+
+  return{gaps, latest, recentGaps, summary};
+}
+
+function drawGapZones(ctx, gapData, candles, xOf, yOf, LPAD, W){
+  // Draw gap zones on chart — unfilled gaps are most important
+  gapData.gaps.slice(-10).forEach(g=>{
+    if(g.filled) return;  // Only show unfilled gaps
+    const c=candles[g.i], prev=candles[g.i-1];
+    if(!c||!prev) return;
+    const y1=yOf(g.i>0?(g.type.includes('↑')?prev.h:prev.l):c.o);
+    const y2=yOf(g.i>0?(g.type.includes('↑')?c.o:c.o):prev.c);
+    if(Math.abs(y2-y1)<2) return;
+    ctx.fillStyle=g.col.length>7?g.col:g.col+'22';
+    ctx.fillRect(LPAD, Math.min(y1,y2), W-LPAD, Math.abs(y2-y1));
+    ctx.strokeStyle=g.col+'60';ctx.lineWidth=1;ctx.setLineDash([2,2]);
+    ctx.beginPath();ctx.moveTo(LPAD,y1);ctx.lineTo(W,y1);ctx.stroke();
+    ctx.setLineDash([]);
+  });
+}
+
+// ── #2 REAL-TIME PRICE UPDATES ────────────────────────────
+let rtInterval = null;
+let rtEnabled  = false;
+
+function startRealTimeUpdates(){
+  stopRealTimeUpdates();
+  if(!TICKER) return;
+
+  // Only run during market hours (9:30 AM – 4 PM ET, Mon–Fri)
+  function isMarketHours(){
+    const now=new Date();
+    const et=new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',hour:'numeric',minute:'numeric',weekday:'short'}).formatToParts(now);
+    const parts=Object.fromEntries(et.map(p=>[p.type,p.value]));
+    const day=parts.weekday;
+    if(['Sat','Sun'].includes(day)) return false;
+    const h=parseInt(parts.hour)+(parts.dayPeriod==='PM'&&parts.hour!=='12'?12:0);
+    const m=parseInt(parts.minute);
+    const mins=h*60+m;
+    return mins>=570&&mins<=960;  // 9:30–16:00
+  }
+
+  // Update price ticker bar without full reload
+  async function updatePrice(){
+    if(!TICKER||!rtEnabled) return;
+    try{
+      const q=await fetchQuote(TICKER);
+      if(!q) return;
+      const cur=TICKER.endsWith('.TO')?'CAD':'USD';
+      const cs=cur==='CAD'?'CA$':'$';
+      const col=q.change>=0?'var(--green)':'var(--red)';
+      const sign=q.change>=0?'+':'';
+      const chgP=(q.change/(q.price-q.change)*100).toFixed(2);
+      // Update only the price section of the ticker bar
+      const pxEl=document.querySelector('.tpx');
+      const chgEl=document.querySelector('.tchg');
+      if(pxEl) pxEl.textContent=`${cs}${q.price.toFixed(2)}`;
+      if(pxEl) pxEl.style.color=col;
+      if(chgEl){ chgEl.textContent=`${sign}${q.change.toFixed(2)} (${sign}${chgP}%)`; chgEl.style.color=col; }
+      // Show RT indicator
+      const rtDot=document.getElementById('RT_DOT');
+      if(rtDot){ rtDot.style.background='var(--green)'; setTimeout(()=>{if(rtDot)rtDot.style.background='var(--muted)';},600); }
+    }catch{ /* silent fail */ }
+  }
+
+  if(isMarketHours()){
+    rtEnabled=true;
+    rtInterval=setInterval(updatePrice, 60000);  // Every 60 seconds
+    updatePrice();  // Immediate first update
+  }
+}
+
+function stopRealTimeUpdates(){
+  if(rtInterval){ clearInterval(rtInterval); rtInterval=null; }
+  rtEnabled=false;
+}
+
 // ── MAIN SIGNAL FUNCTION ──────────────────────────────────
 function estSig(price,e9v,e21v,e50v,rsiV,candles,e200v,atrVal){
   let b=0;
@@ -1167,7 +1377,9 @@ function estSig(price,e9v,e21v,e50v,rsiV,candles,e200v,atrVal){
 }
 // ── MAIN GO ───────────────────────────────────────────────
 async function go(sym){
-  if(!sym)return;sym=sym.toUpperCase().trim();TICKER=sym;
+  if(!sym)return;sym=sym.toUpperCase().trim();
+  stopRealTimeUpdates();  // Stop updates for previous ticker
+  TICKER=sym;
   document.getElementById("SI").value=sym;
   document.getElementById("AO").textContent="";
   document.getElementById("AB").disabled=true;document.getElementById("AB").textContent="FETCHING...";
@@ -1365,22 +1577,65 @@ async function go(sym){
       });
     }
 
-    // Build extras for chart (S/R zones, earnings)
+    // Build extras for chart (S/R zones, earnings, gaps)
     const lows50=candles.slice(-50).map(c=>c.l).sort((a,b)=>a-b);
     const highs50=candles.slice(-50).map(c=>c.h).sort((a,b)=>b-a);
     const chartSupport=lows50[Math.floor(lows50.length*.1)];
     const chartResist=highs50[Math.floor(highs50.length*.1)];
 
-    // Find earnings candle index (approximate — flag last high-volume spike)
+    // Find earnings candle index (high-volume spike)
     let earningsIdx=null;
     const avgVE=candles.reduce((a,c)=>a+c.v,0)/candles.length;
     for(let i=candles.length-30;i<candles.length-2;i++){
       if(candles[i].v>avgVE*4&&Math.abs(candles[i].c-candles[i].o)/candles[i].o>0.03){earningsIdx=i;break;}
     }
 
-    LAST_EXTRAS={support:chartSupport,resist:chartResist,earningsIdx};
+    // #8 Gap detection
+    const gapData=detectGaps(candles);
+
+    LAST_EXTRAS={support:chartSupport,resist:chartResist,earningsIdx,gapData};
     LAST_DATA={candles,e9a,e21a,e50a,rsi14,e200a,atrArr};LAST_SIG=sig;
     drawAll(LAST_DATA,LAST_SIG);
+
+    // #10 Walk-forward validation (runs in background, updates perf panel)
+    setTimeout(()=>{
+      const wf=runWalkForward(candles,e9a,e21a,e50a,rsi14,atrArr,e200a);
+      if(wf){
+        const wfEl=document.getElementById('WF_SECTION');
+        const wfCol=wf.winRate>=60?'var(--green)':wf.winRate>=50?'var(--amber)':'var(--red)';
+        const gapCol=wf.gap>=0?'var(--green)':wf.gap>=-15?'var(--amber)':'var(--red)';
+        const wfHtml=`<div id="WF_SECTION" style="border-top:1px solid var(--border);padding-top:8px;margin-top:4px">
+          <div style="font-size:9px;font-weight:700;letter-spacing:1.5px;color:var(--muted);margin-bottom:6px">WALK-FORWARD VALIDATION (#10)</div>
+          <div class="row"><span class="lbl">Test period</span><span class="val" style="font-size:9px">${wf.period}</span></div>
+          <div class="row"><span class="lbl">Test signals</span><span class="val">${wf.signals}</span></div>
+          <div class="row"><span class="lbl">Out-of-sample WR</span><span class="val" style="color:${wfCol}">${wf.winRate}%</span></div>
+          <div class="row"><span class="lbl">In-sample WR</span><span class="val">${wf.trainWR}%</span></div>
+          <div class="row"><span class="lbl">Degradation</span><span class="val" style="color:${gapCol}">${wf.gap>=0?'+':''}${wf.gap}%</span></div>
+          <div class="row"><span class="lbl">Avg R:R</span><span class="val wn">${wf.avgRR}R</span></div>
+          <div style="background:var(--bg3);border-radius:5px;padding:6px 8px;margin-top:6px;font-size:10px;color:${wfCol}">${wf.verdict}</div>
+        </div>`;
+        const perf=document.getElementById('PERF');
+        if(wfEl) wfEl.outerHTML=wfHtml;
+        else if(perf) perf.insertAdjacentHTML('beforeend',wfHtml);
+      }
+    },100);
+
+    // #8 Gap analysis — add to signal panel
+    if(gapData.latest){
+      const g=gapData.latest;
+      const gCol=g.signal==='BULLISH'?'var(--green)':g.signal==='BEARISH'?'var(--red)':'var(--amber)';
+      const gHtml=`<div style="background:rgba(0,0,0,.2);border:1px solid ${gCol}40;border-radius:5px;padding:7px 9px;margin-bottom:8px;font-size:10px;">
+        <span style="color:${gCol};font-weight:700">GAP: ${g.type}</span> &nbsp;${g.gapPct>=0?'+':''}${g.gapPct}%
+        ${g.highVol?'<span style="color:var(--green);margin-left:6px">HIGH VOL</span>':''}
+        ${g.filled?'<span style="color:var(--amber);margin-left:6px">FILLED</span>':'<span style="color:var(--muted);margin-left:6px">UNFILLED</span>'}
+        <div style="color:var(--muted);margin-top:3px;font-size:9px">${g.signal==='BULLISH'?'Bullish breakaway — confirms upward momentum':g.signal==='BEARISH'?'Bearish gap — avoid long entry':g.type.includes('FILL')?'Gap fill pattern — watch for resumption':'Common gap — limited signal value'}</div>
+      </div>`;
+      const pgEl=document.getElementById('PG');
+      if(pgEl) pgEl.insertAdjacentHTML('afterbegin',gHtml);
+    }
+
+    // Start real-time price updates
+    startRealTimeUpdates();
 
     // E: Signal confidence decay
     SIGNAL_TS=sig?Date.now()/1000:SIGNAL_TS;
@@ -1409,6 +1664,97 @@ async function go(sym){
     document.getElementById("TB").innerHTML=`<span style="color:var(--red);font-size:12px">&#10007; ${sym}: ${err.message}</span>`;
     console.error(err);
   }
+}
+
+// ── #10 WALK-FORWARD VALIDATION ──────────────────────────
+function runWalkForward(candles, e9a, e21a, e50a, rsi14, atrArr, e200a){
+  // Split: train on first 75%, test on last 25%
+  const N       = candles.length;
+  const split   = Math.floor(N * 0.75);
+  const testSet = candles.slice(split);
+  const MIN_TEST = 30;
+  if(testSet.length < MIN_TEST) return null;
+
+  // Run signal detection on TEST period only (data the model never "saw")
+  const results = [];
+  for(let i=split; i<N-10; i++){
+    const price  = candles[i].c;
+    const e9v    = e9a[i], e21v=e21a[i], e50v=e50a[i];
+    const rsiV   = rsi14[i], e200v=e200a?e200a[i]:null;
+    const atrVal = atrArr[i];
+    if(!e9v||!e21v||!e50v||!rsiV) continue;
+
+    // Apply same signal rules as estSig
+    const sig1=e9v>e21v&&e21v>e50v;
+    const sig2=price>e50v;
+    const sig3=rsiV>45&&rsiV<70;
+    const lc=candles[i];
+    const sig4=lc.c>lc.o;
+    const score=+sig1+ +sig2+ +sig3+ +sig4;
+    if(score<4) continue;
+    if(e200v&&price<e200v) continue;
+
+    // ATR stop
+    const atr=atrVal||Math.abs(lc.h-lc.l);
+    const stop=price-atr*1.5;
+    const r=price-stop;
+    if(r<=0) continue;
+    const tp1=price+r*2;
+    const rr=Math.abs(tp1-price)/r;
+    if(rr<2) continue;
+
+    // Forward test: did price hit TP1 or stop within 15 candles?
+    let outcome=null;
+    for(let j=i+1;j<=Math.min(i+15,N-1);j++){
+      if(candles[j].h>=tp1){ outcome='WIN';  break; }
+      if(candles[j].l<=stop){ outcome='LOSS'; break; }
+    }
+    if(!outcome) continue;
+
+    results.push({
+      i, date:new Date(candles[i].t*1000),
+      price, stop:+stop.toFixed(2), tp1:+tp1.toFixed(2),
+      outcome, rr:+rr.toFixed(1)
+    });
+  }
+
+  if(!results.length) return {signals:0, wins:0, losses:0, winRate:0, totalRR:0, verdict:'No signals in test period'};
+
+  const wins    = results.filter(r=>r.outcome==='WIN').length;
+  const losses  = results.length - wins;
+  const winRate = Math.round(wins/results.length*100);
+  const totalRR = results.reduce((a,r)=>a+(r.outcome==='WIN'?r.rr:-1),0);
+  const avgRR   = +(totalRR/results.length).toFixed(2);
+
+  // Compare to in-sample (training) period
+  const trainResults = [];
+  for(let i=50;i<split-10;i++){
+    const price=candles[i].c;
+    const e9v=e9a[i],e21v=e21a[i],e50v=e50a[i],rsiV=rsi14[i];
+    if(!e9v||!e21v||!e50v||!rsiV) continue;
+    const score=+(e9v>e21v&&e21v>e50v)+ +(price>e50v)+ +(rsiV>45&&rsiV<70)+ +(candles[i].c>candles[i].o);
+    if(score<4) continue;
+    const atr=atrArr[i]||Math.abs(candles[i].h-candles[i].l);
+    const stop=price-atr*1.5,tp1=price+(price-stop)*2;
+    let outcome=null;
+    for(let j=i+1;j<=Math.min(i+15,split-1);j++){
+      if(candles[j].h>=tp1){outcome='WIN';break;}
+      if(candles[j].l<=stop){outcome='LOSS';break;}
+    }
+    if(outcome) trainResults.push(outcome);
+  }
+  const trainWins=trainResults.filter(r=>r==='WIN').length;
+  const trainWR=trainResults.length?Math.round(trainWins/trainResults.length*100):0;
+  const gap=winRate-trainWR;
+
+  let verdict;
+  if(winRate>=60&&gap>-15)      verdict='ROBUST — out-of-sample performance is strong';
+  else if(winRate>=50&&gap>-20) verdict='ACCEPTABLE — mild degradation out-of-sample';
+  else if(gap<-20)              verdict='CURVE-FITTED — significant drop out-of-sample';
+  else                          verdict='WEAK — strategy underperforms in test period';
+
+  return{signals:results.length,wins,losses,winRate,trainWR,gap,totalRR:+totalRR.toFixed(2),avgRR,verdict,
+         period:`${new Date(candles[split].t*1000).toLocaleDateString('en-US',{month:'short',year:'numeric'})} — present`};
 }
 
 // ── RENDER WEEKLY PANEL ──────────────────────────────────
@@ -1568,9 +1914,19 @@ async function runC(){
     const cur=TICKER.endsWith(".TO")?"CAD":"USD";
     const shortName=res.meta.shortName||TICKER;
 
+    // #14 Claude prompt memory — pass recent signal history
+    const signalHistory=JSON.parse(localStorage.getItem('signalHistory')||'[]');
+    const tickerHistory=signalHistory.filter(s=>s.ticker===TICKER).slice(-5);
+    const historyBlock=tickerHistory.length?`
+RECENT SIGNAL HISTORY FOR ${TICKER} (last ${tickerHistory.length} analyses):
+${tickerHistory.map(h=>`  ${h.date}: ${h.signal} @ $${h.price} — ${h.outcome||'outcome unknown'}`).join('\n')}
+Use this history to avoid recommending the same broken setup twice and to note any patterns in how this ticker behaves.`:'';
+
     const systemPrompt=`You are a senior professional stock analyst with 20+ years experience in both technical analysis and fundamental research. You specialize in Shariah-compliant investing and swing/position trading.
 
-Your job is to provide a comprehensive, honest, and professional trade audit — the same quality analysis a top-tier hedge fund analyst would produce. Be specific, cite exact price levels, and give a clear final verdict.`;
+Your job is to provide a comprehensive, honest, and professional trade audit — the same quality analysis a top-tier hedge fund analyst would produce. Be specific, cite exact price levels, and give a clear final verdict.
+
+IMPORTANT: You have access to this ticker's recent signal history. Use it to avoid repeating failed setups and to provide contextually aware analysis.${historyBlock}`;
 
     const userPrompt=`Perform a full professional trade audit for ${TICKER} (${shortName}) — ${cur}.
 
@@ -1671,6 +2027,17 @@ SUMMARY: [3-4 sentences. Professional final assessment integrating both technica
       .replace(/\n/g,"<br>");
 
     out.innerHTML=`<div style="font-size:10px;line-height:1.8;color:#aabbcc;">${formatted}</div>`;
+
+    // Save to signal history for future Claude context (#14)
+    const hist=JSON.parse(localStorage.getItem('signalHistory')||'[]');
+    hist.push({
+      ticker:TICKER,
+      date:new Date().toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}),
+      price:price.toFixed(2),
+      signal:LAST_SIG?`LONG — Entry $${LAST_SIG.entry} Stop $${LAST_SIG.stop} TP $${LAST_SIG.tp1}`:'NO SIGNAL',
+      outcome:null
+    });
+    localStorage.setItem('signalHistory',JSON.stringify(hist.slice(-20)));
 
   }catch(e){out.textContent="Error: "+e.message;console.error(e);}
   finally{btn.disabled=false;btn.textContent="&#9889; RUN CLAUDE ANALYSIS";}
